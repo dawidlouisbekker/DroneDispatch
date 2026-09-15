@@ -1,0 +1,73 @@
+// auth-service internal API. OAuth, JWKS and login stay on public HTTP; this is
+// for other services only.
+syntax = "proto3";
+
+package dronedrop.auth.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Account lookups. Other services store only a user's `sub` and fetch contact
+// details here when they need them.
+service UserDirectory {
+  // Callers: merchant (member emails for notifications), commerce (Stripe customer email).
+  // Errors: NOT_FOUND (USER_NOT_FOUND).
+  rpc GetUser(GetUserRequest) returns (GetUserResponse);
+
+  // Unknown subs are left out of the response.
+  // Callers: merchant.
+  rpc BatchGetUsers(BatchGetUsersRequest) returns (BatchGetUsersResponse);
+}
+
+// Revoked grants, so a resource server can rebuild its denylist at start-up
+// before following `auth.events.grant_revoked`.
+service GrantRegistry {
+  // Callers: dispatch, merchant, map.
+  rpc ListRevokedGrants(ListRevokedGrantsRequest) returns (ListRevokedGrantsResponse);
+}
+
+message User {
+  string sub = 1;
+  string email = 2;
+  bool email_verified = 3;
+  // True when TOTP or a passkey is enrolled.
+  bool mfa_enrolled = 4;
+  google.protobuf.Timestamp created_at = 5;
+  // Set when the account is disabled. Disabled users cannot log in.
+  google.protobuf.Timestamp disabled_at = 6;
+}
+
+message GetUserRequest {
+  string sub = 1;
+}
+
+message GetUserResponse {
+  User user = 1;
+}
+
+message BatchGetUsersRequest {
+  repeated string subs = 1;
+}
+
+message BatchGetUsersResponse {
+  repeated User users = 1;
+}
+
+message ListRevokedGrantsRequest {
+  // Only grants revoked at or after this time. Access tokens live for at most an
+  // hour, so callers normally pass "now minus one hour".
+  google.protobuf.Timestamp revoked_since = 1;
+  dronedrop.common.v1.PageRequest page = 2;
+}
+
+message RevokedGrant {
+  // The `gid` claim carried by every token of the grant.
+  string grant_id = 1;
+  string sub = 2;
+  google.protobuf.Timestamp revoked_at = 3;
+}
+
+message ListRevokedGrantsResponse {
+  repeated RevokedGrant grants = 1;
+  dronedrop.common.v1.PageInfo page = 2;
+}

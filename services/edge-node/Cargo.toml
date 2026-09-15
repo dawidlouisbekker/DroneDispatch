@@ -1,0 +1,15 @@
+[package]
+name = "edge-node"
+description = "Drone flight simulation and pickup marker vision for one Drone Drop MEC zone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+contracts.workspace = true
+futures.workspace = true
+svc-common.workspace = true
+tokio.workspace = true
+tracing.workspace = true

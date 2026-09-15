@@ -1,0 +1,14 @@
+[
+  {
+    "name": "leaf-sea-north",
+    "listen": "0.0.0.0:7423",
+    "upstream": "nats-hub:7422",
+    "enabled": true
+  },
+  {
+    "name": "leaf-sea-south",
+    "listen": "0.0.0.0:7424",
+    "upstream": "nats-hub:7422",
+    "enabled": true
+  }
+]

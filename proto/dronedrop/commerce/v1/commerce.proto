@@ -1,0 +1,423 @@
+// commerce-service internal API: checkout, orders, delivery locations and payments.
+// Stripe webhooks stay on public HTTP.
+syntax = "proto3";
+
+package dronedrop.commerce.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Carts, quotes and voice ordering.
+service Checkout {
+  // Replaces the customer's cart and returns a fresh quote, valid for 10 minutes,
+  // with stock held. The previous quote is superseded and its hold released.
+  // Callers: dispatch.
+  // Errors: FAILED_PRECONDITION (LOCATION_UNVERIFIED, OUT_OF_STOCK, OVER_PAYLOAD_LIMIT, MERCHANT_NOT_ACCEPTING, OUTSIDE_DELIVERY_AREA),
+  // NOT_FOUND (SHOP_NOT_FOUND, ITEM_NOT_FOUND, LOCATION_NOT_FOUND).
+  rpc UpsertCart(UpsertCartRequest) returns (UpsertCartResponse);
+
+  // Quotes the items of a past order again at current prices.
+  // Callers: dispatch.
+  // Errors: as UpsertCart, plus NOT_FOUND (ORDER_NOT_FOUND).
+  rpc Reorder(ReorderRequest) returns (ReorderResponse);
+
+  // Authorizes payment for a quote (manual capture) and creates the order.
+  // Idempotent on quote_id: a retry returns the same order and never charges twice.
+  // Callers: dispatch.
+  // Errors: FAILED_PRECONDITION (CUSTOMER_NOT_CONFIRMED, QUOTE_EXPIRED, QUOTE_SUPERSEDED, TOTAL_MISMATCH,
+  // LOCATION_UNVERIFIED, SPENDING_CAP_EXCEEDED, NO_PAYMENT_METHOD, MERCHANT_NOT_ACCEPTING),
+  // NOT_FOUND (QUOTE_NOT_FOUND, also for another customer's quote).
+  rpc PlaceOrder(PlaceOrderRequest) returns (PlaceOrderResponse);
+}
+
+// A customer's orders.
+service Orders {
+  // An empty order_id returns the customer's most recent order.
+  // Callers: dispatch, map.
+  // Errors: NOT_FOUND (ORDER_NOT_FOUND, also for another customer's order).
+  rpc GetOrder(GetOrderRequest) returns (GetOrderResponse);
+
+  // Newest first.
+  // Callers: dispatch, map.
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
+
+  // Cancels before pickup: voids the authorization or refunds, and recalls the drone.
+  // Idempotent on order_id.
+  // Callers: dispatch, map.
+  // Errors: FAILED_PRECONDITION (ORDER_ALREADY_PICKED_UP), NOT_FOUND (ORDER_NOT_FOUND).
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+
+  // Shops ordered from and drop-off locations used, most recent first.
+  // Callers: dispatch.
+  rpc ListPastOrderLocations(ListPastOrderLocationsRequest) returns (ListPastOrderLocationsResponse);
+}
+
+// Where a customer's drones may deliver.
+service DeliveryLocations {
+  // Callers: dispatch, map.
+  rpc ListDeliveryLocations(ListDeliveryLocationsRequest) returns (ListDeliveryLocationsResponse);
+
+  // Creates a PENDING location. The caller geocodes the address with Amazon Location first.
+  // Callers: dispatch, map.
+  // Errors: ALREADY_EXISTS (LOCATION_LABEL_TAKEN), FAILED_PRECONDITION (OUTSIDE_DELIVERY_AREA).
+  rpc RequestDeliveryLocation(RequestDeliveryLocationRequest) returns (RequestDeliveryLocationResponse);
+
+  // Marks a PENDING location VERIFIED. map-service calls it after an MFA step-up
+  // and passes the evidence from the customer's token; commerce re-checks it.
+  // Idempotent on delivery_location_id.
+  // Callers: map.
+  // Errors: FAILED_PRECONDITION (MFA_REQUIRED, MFA_TOO_OLD, LOCATION_REVOKED), NOT_FOUND (LOCATION_NOT_FOUND).
+  rpc VerifyDeliveryLocation(VerifyDeliveryLocationRequest) returns (VerifyDeliveryLocationResponse);
+}
+
+// A customer's saved card and voice-order spending caps.
+service CustomerPayments {
+  // Callers: dispatch, map.
+  rpc GetPaymentSettings(GetPaymentSettingsRequest) returns (GetPaymentSettingsResponse);
+
+  // Callers: map.
+  // Errors: INVALID_ARGUMENT (INVALID_LIMITS).
+  rpc UpdateSpendingLimits(UpdateSpendingLimitsRequest) returns (UpdateSpendingLimitsResponse);
+
+  // Returns a Stripe Checkout (setup mode) URL for saving a card.
+  // Callers: map.
+  rpc CreatePaymentSetupSession(CreatePaymentSetupSessionRequest) returns (CreatePaymentSetupSessionResponse);
+}
+
+// The business side of orders and payouts. merchant-service calls these on
+// behalf of a business member it has already authorized.
+service MerchantOrders {
+  // Captures the authorized payment. Idempotent on order_id.
+  // Callers: merchant.
+  // Errors: FAILED_PRECONDITION (ORDER_NOT_AWAITING_MERCHANT, ACCEPT_WINDOW_EXPIRED), NOT_FOUND (ORDER_NOT_FOUND).
+  rpc AcceptOrder(AcceptOrderRequest) returns (AcceptOrderResponse);
+
+  // Voids the authorization; the customer is never charged. Idempotent on order_id.
+  // Callers: merchant.
+  // Errors: FAILED_PRECONDITION (ORDER_NOT_AWAITING_MERCHANT), NOT_FOUND (ORDER_NOT_FOUND).
+  rpc RejectOrder(RejectOrderRequest) returns (RejectOrderResponse);
+
+  // Creates the business's Stripe connected account if needed and returns a hosted onboarding link.
+  // Callers: merchant.
+  rpc CreateOnboardingLink(CreateOnboardingLinkRequest) returns (CreateOnboardingLinkResponse);
+
+  // Callers: merchant.
+  rpc GetMerchantPaymentStatus(GetMerchantPaymentStatusRequest) returns (GetMerchantPaymentStatusResponse);
+}
+
+// The order saga. See "Order state machine" in docs/ARCHITECTURE.md.
+enum OrderState {
+  ORDER_STATE_UNSPECIFIED = 0;
+  ORDER_STATE_CART = 1;
+  ORDER_STATE_QUOTED = 2;
+  ORDER_STATE_AUTHORIZING = 3;
+  ORDER_STATE_AWAITING_MERCHANT = 4;
+  ORDER_STATE_CAPTURING = 5;
+  // Set only by a verified Stripe payment_intent.succeeded webhook.
+  ORDER_STATE_PAID = 6;
+  ORDER_STATE_DISPATCH_REQUESTED = 7;
+  ORDER_STATE_DRONE_ASSIGNED = 8;
+  ORDER_STATE_AT_PICKUP = 9;
+  ORDER_STATE_PICKED_UP = 10;
+  ORDER_STATE_DELIVERED = 11;
+  ORDER_STATE_COMPLETED = 12;
+  ORDER_STATE_PAYMENT_FAILED = 13;
+  ORDER_STATE_CANCELLED = 14;
+  ORDER_STATE_REFUNDED = 15;
+}
+
+enum DeliveryLocationStatus {
+  DELIVERY_LOCATION_STATUS_UNSPECIFIED = 0;
+  // Waiting for MFA verification in the customer app.
+  DELIVERY_LOCATION_STATUS_PENDING = 1;
+  DELIVERY_LOCATION_STATUS_VERIFIED = 2;
+  DELIVERY_LOCATION_STATUS_REVOKED = 3;
+}
+
+// A menu item as quoted. Name, price and weight are copied at quote time.
+message LineItem {
+  // merchant-service menu_items.id.
+  string item_id = 1;
+  string name = 2;
+  dronedrop.common.v1.Money unit_price = 3;
+  int32 qty = 4;
+  // Weight of one unit.
+  int32 weight_g = 5;
+}
+
+message DeliveryLocation {
+  string delivery_location_id = 1;
+  string customer_sub = 2;
+  // Customer's name for it, e.g. "office".
+  string label = 3;
+  string address = 4;
+  dronedrop.common.v1.LatLon position = 5;
+  DeliveryLocationStatus status = 6;
+  google.protobuf.Timestamp verified_at = 7;
+  google.protobuf.Timestamp created_at = 8;
+}
+
+message Quote {
+  string quote_id = 1;
+  string customer_sub = 2;
+  string business_id = 3;
+  string business_name = 4;
+  DeliveryLocation delivery_location = 5;
+  repeated LineItem items = 6;
+  dronedrop.common.v1.Money subtotal = 7;
+  dronedrop.common.v1.Money delivery_fee = 8;
+  dronedrop.common.v1.Money total = 9;
+  // Total weight; the drone limit is 2500 g.
+  int32 payload_g = 10;
+  int32 eta_seconds = 11;
+  google.protobuf.Timestamp expires_at = 12;
+}
+
+message OrderStateChange {
+  OrderState state = 1;
+  google.protobuf.Timestamp at = 2;
+  // Why the state changed, e.g. "merchant rejected: out of oat milk".
+  string reason = 3;
+}
+
+message Order {
+  string order_id = 1;
+  string customer_sub = 2;
+  string business_id = 3;
+  string business_name = 4;
+  string quote_id = 5;
+  OrderState state = 6;
+  repeated LineItem items = 7;
+  dronedrop.common.v1.Money subtotal = 8;
+  dronedrop.common.v1.Money delivery_fee = 9;
+  dronedrop.common.v1.Money total = 10;
+  // Copy of the location at order time.
+  DeliveryLocation delivery_location = 11;
+  // The merchant must accept by this time or the authorization is voided.
+  google.protobuf.Timestamp merchant_accept_by = 12;
+  int32 eta_seconds = 13;
+  repeated OrderStateChange timeline = 14;
+  google.protobuf.Timestamp created_at = 15;
+  google.protobuf.Timestamp updated_at = 16;
+}
+
+message CartLine {
+  string item_id = 1;
+  int32 qty = 2;
+}
+
+message UpsertCartRequest {
+  string customer_sub = 1;
+  string business_id = 2;
+  // The complete cart; replaces any previous lines.
+  repeated CartLine lines = 3;
+  // Must be VERIFIED.
+  string delivery_location_id = 4;
+}
+
+message UpsertCartResponse {
+  Quote quote = 1;
+}
+
+message ReorderRequest {
+  string customer_sub = 1;
+  string order_id = 2;
+  // Defaults to the past order's delivery location.
+  string delivery_location_id = 3;
+}
+
+message ReorderResponse {
+  Quote quote = 1;
+  // Items from the past order that are no longer available and were left out.
+  repeated string unavailable_item_ids = 2;
+}
+
+message PlaceOrderRequest {
+  string customer_sub = 1;
+  string quote_id = 2;
+  // The total read back to the customer. Must equal the quote total.
+  int64 expected_total_cents = 3;
+  // True only if the customer explicitly said yes to the read-back.
+  bool customer_confirmed = 4;
+}
+
+message PlaceOrderResponse {
+  Order order = 1;
+}
+
+message GetOrderRequest {
+  string customer_sub = 1;
+  string order_id = 2;
+}
+
+message GetOrderResponse {
+  Order order = 1;
+}
+
+message ListOrdersRequest {
+  string customer_sub = 1;
+  dronedrop.common.v1.PageRequest page = 2;
+  // Only orders from this business.
+  string business_id = 3;
+}
+
+message ListOrdersResponse {
+  repeated Order orders = 1;
+  dronedrop.common.v1.PageInfo page = 2;
+}
+
+message CancelOrderRequest {
+  string customer_sub = 1;
+  string order_id = 2;
+  string reason = 3;
+}
+
+message CancelOrderResponse {
+  Order order = 1;
+}
+
+message ListPastOrderLocationsRequest {
+  string customer_sub = 1;
+  int32 limit = 2;
+}
+
+message PastShop {
+  string business_id = 1;
+  string business_name = 2;
+  int32 order_count = 3;
+  google.protobuf.Timestamp last_ordered_at = 4;
+}
+
+message PastDropoff {
+  DeliveryLocation location = 1;
+  int32 order_count = 2;
+  google.protobuf.Timestamp last_ordered_at = 3;
+}
+
+message ListPastOrderLocationsResponse {
+  repeated PastShop shops = 1;
+  repeated PastDropoff dropoffs = 2;
+}
+
+message ListDeliveryLocationsRequest {
+  string customer_sub = 1;
+  bool include_pending = 2;
+}
+
+message ListDeliveryLocationsResponse {
+  repeated DeliveryLocation locations = 1;
+}
+
+message RequestDeliveryLocationRequest {
+  string customer_sub = 1;
+  string label = 2;
+  string address = 3;
+  // Geocoded by the caller.
+  dronedrop.common.v1.LatLon position = 4;
+}
+
+message RequestDeliveryLocationResponse {
+  DeliveryLocation location = 1;
+}
+
+message VerifyDeliveryLocationRequest {
+  string customer_sub = 1;
+  string delivery_location_id = 2;
+  // `amr` claim of the customer's step-up token. Must include "otp" or "hwk".
+  repeated string amr = 3;
+  // `auth_time` claim of that token. Must be at most 5 minutes old.
+  google.protobuf.Timestamp auth_time = 4;
+}
+
+message VerifyDeliveryLocationResponse {
+  DeliveryLocation location = 1;
+}
+
+message SpendingLimits {
+  dronedrop.common.v1.Money per_order_cap = 1;
+  dronedrop.common.v1.Money daily_cap = 2;
+}
+
+message PaymentMethodSummary {
+  string brand = 1;
+  string last4 = 2;
+  int32 exp_month = 3;
+  int32 exp_year = 4;
+}
+
+message GetPaymentSettingsRequest {
+  string customer_sub = 1;
+}
+
+message GetPaymentSettingsResponse {
+  SpendingLimits limits = 1;
+  // Unset when no card is saved.
+  PaymentMethodSummary default_payment_method = 2;
+  // Total of today's voice orders that count towards the daily cap.
+  dronedrop.common.v1.Money spent_today = 3;
+}
+
+message UpdateSpendingLimitsRequest {
+  string customer_sub = 1;
+  SpendingLimits limits = 2;
+}
+
+message UpdateSpendingLimitsResponse {
+  SpendingLimits limits = 1;
+}
+
+message CreatePaymentSetupSessionRequest {
+  string customer_sub = 1;
+  string success_url = 2;
+  string cancel_url = 3;
+}
+
+message CreatePaymentSetupSessionResponse {
+  string checkout_url = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message AcceptOrderRequest {
+  string business_id = 1;
+  string order_id = 2;
+  // auth-service users.id of the business member who accepted.
+  string member_sub = 3;
+}
+
+message AcceptOrderResponse {
+  OrderState state = 1;
+}
+
+message RejectOrderRequest {
+  string business_id = 1;
+  string order_id = 2;
+  string member_sub = 3;
+  string reason = 4;
+}
+
+message RejectOrderResponse {
+  OrderState state = 1;
+}
+
+message CreateOnboardingLinkRequest {
+  string business_id = 1;
+  // Where Stripe sends the member if the link expires.
+  string refresh_url = 2;
+  // Where Stripe sends the member after onboarding.
+  string return_url = 3;
+}
+
+message CreateOnboardingLinkResponse {
+  string url = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+message GetMerchantPaymentStatusRequest {
+  string business_id = 1;
+}
+
+message GetMerchantPaymentStatusResponse {
+  bool onboarding_started = 1;
+  bool charges_enabled = 2;
+  bool payouts_enabled = 3;
+}

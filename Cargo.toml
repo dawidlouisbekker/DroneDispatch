@@ -1,0 +1,45 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "services/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace.dependencies]
+# Shared crates
+contracts = { path = "crates/contracts" }
+geo = { path = "crates/geo" }
+svc-auth = { path = "crates/svc-auth" }
+svc-common = { path = "crates/svc-common" }
+
+# Runtime and HTTP
+tokio = { version = "1.53", features = ["full"] }
+axum = "0.8.9"
+futures = "0.3"
+
+# Messaging and storage
+async-nats = "0.50"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid"] }
+
+# gRPC and protobuf (crates/contracts)
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+tonic-prost-build = "0.14.6"
+prost = "0.14"
+prost-types = "0.14"
+protox = "0.9.1"
+
+# MCP (dispatch-service)
+rmcp = { version = "3.3", features = ["server", "macros", "transport-streamable-http-server"] }
+
+# Serialization, errors, observability
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7", "serde"] }

@@ -1,0 +1,19 @@
+[package]
+name = "contracts"
+description = "gRPC services, protobuf messages and NATS subjects shared by Drone Drop services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+geo.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+
+[build-dependencies]
+prost.workspace = true
+protox.workspace = true
+tonic-prost-build.workspace = true

@@ -1,0 +1,31 @@
+// Events published by merchant-service (stream MERCHANT_EVENTS).
+syntax = "proto3";
+
+package dronedrop.events.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "dronedrop/merchant/v1/merchant.proto";
+import "google/protobuf/timestamp.proto";
+
+// Payload of merchant.business.<business_id>.status_changed. commerce stops
+// quoting a shop that is no longer accepting orders.
+message BusinessStatusChanged {
+  string event_id = 1;
+  string business_id = 2;
+  dronedrop.merchant.v1.BusinessStatus status = 3;
+  bool accepting_orders = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+}
+
+// Payload of merchant.pickup_point.verified. The photo is now in the
+// PICKUP_ASSETS object store, which is mirrored to the edge zones.
+message PickupPointVerified {
+  string event_id = 1;
+  string pickup_point_id = 2;
+  string business_id = 3;
+  dronedrop.common.v1.LatLon position = 4;
+  string asset_key = 5;
+  // Hex SHA-256 of the photo, so edges can check their mirrored copy.
+  string photo_sha256 = 6;
+  google.protobuf.Timestamp verified_at = 7;
+}

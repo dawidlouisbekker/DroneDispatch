@@ -1,0 +1,94 @@
+// Events published by commerce-service.
+syntax = "proto3";
+
+package dronedrop.events.v1;
+
+import "dronedrop/commerce/v1/commerce.proto";
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Payload of order.<order_id>.<event> (stream ORDERS). The subject's last token
+// matches the `detail` case, e.g. order.<id>.payment_failed.
+message OrderEvent {
+  // Publisher's outbox id; also the Nats-Msg-Id.
+  string event_id = 1;
+  string order_id = 2;
+  string customer_sub = 3;
+  string business_id = 4;
+  // The order's state after this event.
+  dronedrop.commerce.v1.OrderState state = 5;
+  google.protobuf.Timestamp occurred_at = 6;
+
+  oneof detail {
+    OrderAuthorized authorized = 10;
+    OrderAccepted accepted = 11;
+    OrderPaid paid = 12;
+    OrderDispatched dispatched = 13;
+    OrderPickedUp picked_up = 14;
+    OrderDelivered delivered = 15;
+    OrderPaymentFailed payment_failed = 16;
+    OrderCancelled cancelled = 17;
+    OrderRefunded refunded = 18;
+  }
+}
+
+// Payment is authorized and the order waits for the merchant. merchant-service
+// puts it on the orders board.
+message OrderAuthorized {
+  repeated dronedrop.commerce.v1.LineItem items = 1;
+  dronedrop.common.v1.Money total = 2;
+  int32 payload_g = 3;
+  string pickup_point_id = 4;
+  google.protobuf.Timestamp merchant_accept_by = 5;
+}
+
+message OrderAccepted {
+  string member_sub = 1;
+}
+
+message OrderPaid {
+  dronedrop.common.v1.Money amount_captured = 1;
+}
+
+message OrderDispatched {
+  string zone = 1;
+}
+
+message OrderPickedUp {
+  string drone_id = 1;
+}
+
+message OrderDelivered {}
+
+message OrderPaymentFailed {
+  // Stripe decline code, e.g. "insufficient_funds".
+  string decline_code = 1;
+}
+
+enum CancelReason {
+  CANCEL_REASON_UNSPECIFIED = 0;
+  CANCEL_REASON_CUSTOMER = 1;
+  CANCEL_REASON_MERCHANT_REJECTED = 2;
+  CANCEL_REASON_MERCHANT_TIMEOUT = 3;
+}
+
+message OrderCancelled {
+  CancelReason reason = 1;
+  string note = 2;
+}
+
+message OrderRefunded {
+  dronedrop.common.v1.Money amount = 1;
+  // e.g. "no_drone", "pickup_failed", "mission_aborted", "customer_cancelled".
+  string reason = 2;
+}
+
+// Payload of commerce.merchant_account.<business_id>.updated (stream
+// COMMERCE_EVENTS). merchant-service updates the shop's payments_enabled flag.
+message MerchantAccountUpdated {
+  string event_id = 1;
+  string business_id = 2;
+  bool charges_enabled = 3;
+  bool payouts_enabled = 4;
+  google.protobuf.Timestamp occurred_at = 5;
+}

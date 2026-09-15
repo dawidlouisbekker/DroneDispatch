@@ -1,0 +1,154 @@
+# Local Drone Drop stack: shared infrastructure, the five cloud services, and two
+# simulated MEC edge zones whose NATS uplinks run through toxiproxy.
+name: drone-drop
+
+x-cloud-service: &cloud-service
+  restart: unless-stopped
+  depends_on:
+    postgres: { condition: service_healthy }
+    nats-hub: { condition: service_started }
+
+x-edge-node: &edge-node
+  build: { context: ., args: { SERVICE: edge-node } }
+  restart: unless-stopped
+
+services:
+  # --- Infrastructure --------------------------------------------------------
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./config/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - postgres-data:/var/lib/postgresql/data
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      retries: 15
+
+  nats-hub:
+    image: nats:2.12
+    command: ["-c", "/etc/nats/hub.conf"]
+    volumes:
+      - ./config/nats/hub.conf:/etc/nats/hub.conf:ro
+      - nats-hub-data:/data
+    ports: ["4222:4222", "8222:8222"]
+
+  # Sits on each edge zone's uplink so scripts/ can inject latency and partitions.
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./config/toxiproxy.json:/config/toxiproxy.json:ro
+    ports: ["8474:8474"]
+    depends_on: [nats-hub]
+
+  nats-leaf-sea-north:
+    image: nats:2.12
+    command: ["-c", "/etc/nats/leaf.conf"]
+    volumes:
+      - ./config/nats/leaf-sea-north.conf:/etc/nats/leaf.conf:ro
+    ports: ["4223:4222"]
+    depends_on: [toxiproxy]
+
+  nats-leaf-sea-south:
+    image: nats:2.12
+    command: ["-c", "/etc/nats/leaf.conf"]
+    volumes:
+      - ./config/nats/leaf-sea-south.conf:/etc/nats/leaf.conf:ro
+    ports: ["4224:4222"]
+    depends_on: [toxiproxy]
+
+  minio:
+    image: quay.io/minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio-secret
+    volumes:
+      - minio-data:/data
+    ports: ["9000:9000", "9001:9001"]
+
+  mailpit:
+    image: axllent/mailpit
+    ports: ["8025:8025", "1025:1025"]
+
+  # Optional: docker compose --profile stripe up stripe-cli
+  stripe-cli:
+    image: stripe/stripe-cli
+    profiles: [stripe]
+    command: ["listen", "--api-key", "${STRIPE_SECRET_KEY:-}", "--forward-to", "commerce-service:8084/webhooks/stripe"]
+
+  # --- Cloud services --------------------------------------------------------
+  auth-service:
+    <<: *cloud-service
+    build: { context: ., args: { SERVICE: auth-service } }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8081
+      DATABASE_URL: postgres://auth:auth@postgres:5432/auth
+      NATS_URL: nats://nats-hub:4222
+    ports: ["8081:8081"]
+
+  dispatch-service:
+    <<: *cloud-service
+    build: { context: ., args: { SERVICE: dispatch-service } }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8082
+      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch
+      NATS_URL: nats://nats-hub:4222
+      PUBLIC_URL: ${DISPATCH_PUBLIC_URL:-http://localhost:8082}
+      AUTH_ISSUER: ${AUTH_ISSUER:-http://localhost:8081}
+      MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1}
+    ports: ["8082:8082"]
+
+  merchant-service:
+    <<: *cloud-service
+    build: { context: ., args: { SERVICE: merchant-service } }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8083
+      DATABASE_URL: postgres://merchant:merchant@postgres:5432/merchant
+      NATS_URL: nats://nats-hub:4222
+    ports: ["8083:8083"]
+
+  commerce-service:
+    <<: *cloud-service
+    build: { context: ., args: { SERVICE: commerce-service } }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8084
+      DATABASE_URL: postgres://commerce:commerce@postgres:5432/commerce
+      NATS_URL: nats://nats-hub:4222
+    ports: ["8084:8084"]
+
+  map-service:
+    <<: *cloud-service
+    build: { context: ., args: { SERVICE: map-service } }
+    environment:
+      HTTP_ADDR: 0.0.0.0:8085
+      DATABASE_URL: postgres://map:map@postgres:5432/map
+      NATS_URL: nats://nats-hub:4222
+    ports: ["8085:8085"]
+
+  # --- MEC edge zones --------------------------------------------------------
+  edge-sea-north:
+    <<: *edge-node
+    environment:
+      EDGE_ZONE: sea-north
+      NATS_URL: nats://nats-leaf-sea-north:4222
+      HTTP_ADDR: 0.0.0.0:8090
+    ports: ["8091:8090"]
+    depends_on: [nats-leaf-sea-north]
+
+  edge-sea-south:
+    <<: *edge-node
+    environment:
+      EDGE_ZONE: sea-south
+      NATS_URL: nats://nats-leaf-sea-south:4222
+      HTTP_ADDR: 0.0.0.0:8090
+    ports: ["8092:8090"]
+    depends_on: [nats-leaf-sea-south]
+
+volumes:
+  postgres-data:
+  nats-hub-data:
+  minio-data:

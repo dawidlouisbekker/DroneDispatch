@@ -1,0 +1,26 @@
+// Events published by auth-service (stream AUTH_EVENTS).
+syntax = "proto3";
+
+package dronedrop.events.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Payload of auth.events.grant_revoked. Resource servers reject every token
+// carrying this grant id from now on.
+message GrantRevoked {
+  // Publisher's outbox id; also the Nats-Msg-Id.
+  string event_id = 1;
+  string grant_id = 2;
+  string sub = 3;
+  string client_id = 4;
+  string resource = 5;
+  google.protobuf.Timestamp revoked_at = 6;
+}
+
+// Payload of auth.events.user_deleted. Services delete or anonymize data that
+// references this sub.
+message UserDeleted {
+  string event_id = 1;
+  string sub = 2;
+  google.protobuf.Timestamp deleted_at = 3;
+}

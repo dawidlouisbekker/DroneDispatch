@@ -1,0 +1,43 @@
+// Types shared by every Drone Drop contract.
+//
+// Conventions for every file under proto/:
+// - One package per service and major version: dronedrop.<service>.v1.
+// - One XRequest and XResponse message per RPC, even when empty, so fields can be added later.
+// - Ids are UUID strings. A user is identified by `sub`: auth-service users.id, the JWT subject.
+// - Money uses Money (minor units plus currency). Times use google.protobuf.Timestamp.
+// - Every enum's zero value is <ENUM>_UNSPECIFIED and is never a valid value.
+// - Never renumber or reuse a field. Mark removed fields and names `reserved`.
+// - User-scoped RPCs take `customer_sub`, taken from the JWT the calling service already
+//   validated. The callee trusts it only from the callers listed on the RPC.
+// - Mutations are idempotent on the key named in their comment.
+// - Errors are gRPC status codes. Expected business rejections use FAILED_PRECONDITION,
+//   NOT_FOUND, ALREADY_EXISTS or INVALID_ARGUMENT with a google.rpc.ErrorInfo detail whose
+//   `reason` is one of those listed on the RPC.
+syntax = "proto3";
+
+package dronedrop.common.v1;
+
+// A WGS84 coordinate in decimal degrees.
+message LatLon {
+  double lat = 1;
+  double lon = 2;
+}
+
+message Money {
+  // Amount in the currency's minor unit (cents for USD).
+  int64 amount_cents = 1;
+  // Lower-case ISO 4217 code, e.g. "usd".
+  string currency = 2;
+}
+
+message PageRequest {
+  // Maximum results to return. The server applies a default of 20 and a maximum of 100.
+  int32 page_size = 1;
+  // `next_page_token` from the previous response. Empty for the first page.
+  string page_token = 2;
+}
+
+message PageInfo {
+  // Empty when there are no more results.
+  string next_page_token = 1;
+}

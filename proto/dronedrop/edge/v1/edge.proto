@@ -1,0 +1,96 @@
+// Messages exchanged with edge nodes over NATS leaf nodes. Edge nodes have no
+// gRPC API, so they keep working while their zone is cut off from the cloud.
+// Subject names are in crates/contracts/src/subjects.rs.
+syntax = "proto3";
+
+package dronedrop.edge.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Flight states of the edge simulator.
+enum DroneState {
+  DRONE_STATE_UNSPECIFIED = 0;
+  DRONE_STATE_IDLE = 1;
+  DRONE_STATE_TAKEOFF = 2;
+  DRONE_STATE_TO_PICKUP = 3;
+  DRONE_STATE_APPROACH = 4;
+  DRONE_STATE_VISUAL_LOCK = 5;
+  DRONE_STATE_LOADING = 6;
+  DRONE_STATE_TO_CUSTOMER = 7;
+  DRONE_STATE_DROPOFF = 8;
+  DRONE_STATE_RETURNING = 9;
+  DRONE_STATE_CHARGING = 10;
+}
+
+// Payload of cmd.edge.<zone>.<command>. The subject's last token matches the
+// `command` case: assign, recall, handoff or loaded.
+message EdgeCommand {
+  // Unique per command. Edge nodes ignore duplicates.
+  string command_id = 1;
+  google.protobuf.Timestamp issued_at = 2;
+
+  oneof command {
+    AssignMission assign = 10;
+    RecallMission recall = 11;
+    HandoffDrone handoff = 12;
+    ConfirmLoaded loaded = 13;
+  }
+}
+
+message AssignMission {
+  string order_id = 1;
+  dronedrop.common.v1.LatLon pickup = 2;
+  // Expected in the QR marker the drone reads at pickup.
+  string pickup_point_id = 3;
+  // Verified marker photo in the zone's PICKUP_ASSETS mirror.
+  string asset_key = 4;
+  dronedrop.common.v1.LatLon dropoff = 5;
+  int32 payload_g = 6;
+}
+
+message RecallMission {
+  string order_id = 1;
+  string reason = 2;
+}
+
+// Hands a drone in flight to the zone it is entering.
+message HandoffDrone {
+  string drone_id = 1;
+  string order_id = 2;
+  string from_zone = 3;
+  string to_zone = 4;
+  // Last sample from the old zone, so the new zone continues from it.
+  Telemetry last_sample = 5;
+}
+
+message ConfirmLoaded {
+  string order_id = 1;
+}
+
+// One telemetry sample: 10 Hz on tlm.raw.<zone>.<drone> inside the zone,
+// downsampled to 1 Hz in the TELEMETRY stream that syncs to the hub.
+message Telemetry {
+  string zone = 1;
+  string drone_id = 2;
+  DroneState state = 3;
+  dronedrop.common.v1.LatLon position = 4;
+  float alt_m = 5;
+  float heading_deg = 6;
+  float speed_mps = 7;
+  float battery_pct = 8;
+  // Empty when the drone has no mission.
+  string order_id = 9;
+  google.protobuf.Timestamp at = 10;
+}
+
+// Payload of metrics.edge.<zone>, for the edge health panel.
+message EdgeMetrics {
+  string zone = 1;
+  google.protobuf.Timestamp at = 2;
+  double vision_latency_ms_p50 = 3;
+  double vision_latency_ms_p95 = 4;
+  double control_loop_ms_p95 = 5;
+  int32 active_drones = 6;
+  bool uplink_connected = 7;
+}

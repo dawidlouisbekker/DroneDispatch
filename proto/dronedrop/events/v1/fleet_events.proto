@@ -1,0 +1,52 @@
+// The dispatch command and mission events.
+syntax = "proto3";
+
+package dronedrop.events.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+// Payload of dispatch.request (work queue DISPATCH_REQUESTS). commerce-service
+// publishes it only after Stripe's verified payment_intent.succeeded webhook
+// moved the order to PAID.
+message DispatchRequest {
+  // Publisher's outbox id; also the Nats-Msg-Id.
+  string request_id = 1;
+  string order_id = 2;
+  dronedrop.common.v1.LatLon pickup = 3;
+  string pickup_point_id = 4;
+  // Verified marker photo in the PICKUP_ASSETS object store.
+  string asset_key = 5;
+  dronedrop.common.v1.LatLon dropoff = 6;
+  int32 payload_g = 7;
+  google.protobuf.Timestamp paid_at = 8;
+}
+
+enum MissionEventKind {
+  MISSION_EVENT_KIND_UNSPECIFIED = 0;
+  MISSION_EVENT_KIND_ASSIGNED = 1;
+  MISSION_EVENT_KIND_AT_PICKUP = 2;
+  MISSION_EVENT_KIND_VISUAL_LOCK = 3;
+  MISSION_EVENT_KIND_PICKUP_FAILED = 4;
+  MISSION_EVENT_KIND_PICKED_UP = 5;
+  MISSION_EVENT_KIND_DELIVERED = 6;
+  MISSION_EVENT_KIND_ABORTED = 7;
+  // Published by dispatch-service when no zone had a free drone within 10 minutes.
+  MISSION_EVENT_KIND_NO_DRONE = 8;
+}
+
+// Payload of mission.<order_id>.<event> (stream MISSIONS). The subject's last
+// token is the kind in lower case, e.g. mission.<id>.visual_lock. Published by
+// edge nodes (sourced from their JetStream domains) and relayed by dispatch-service.
+message MissionEvent {
+  // Unique per event; also the Nats-Msg-Id.
+  string event_id = 1;
+  string order_id = 2;
+  MissionEventKind kind = 3;
+  string zone = 4;
+  string drone_id = 5;
+  dronedrop.common.v1.LatLon position = 6;
+  google.protobuf.Timestamp occurred_at = 7;
+  // Human-readable detail, e.g. why a mission was aborted.
+  string detail = 8;
+}

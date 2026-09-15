@@ -1,0 +1,110 @@
+// dispatch-service internal API: drone missions and the fleet. The MCP server
+// for Alexa+ stays on public HTTP.
+syntax = "proto3";
+
+package dronedrop.dispatch.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "dronedrop/edge/v1/edge.proto";
+import "google/protobuf/timestamp.proto";
+
+service Fleet {
+  // Callers: commerce, map.
+  // Errors: NOT_FOUND (MISSION_NOT_FOUND).
+  rpc GetMission(GetMissionRequest) returns (GetMissionResponse);
+
+  // Aborts a mission before pickup, e.g. after a customer cancel. The drone
+  // returns to its hub. Idempotent on order_id.
+  // Callers: commerce.
+  // Errors: FAILED_PRECONDITION (ALREADY_PICKED_UP), NOT_FOUND (MISSION_NOT_FOUND).
+  rpc RecallMission(RecallMissionRequest) returns (RecallMissionResponse);
+
+  // The business loaded the order onto the drone waiting at its pickup point.
+  // Publishes cmd.edge.<zone>.loaded. Idempotent on order_id.
+  // Callers: merchant.
+  // Errors: FAILED_PRECONDITION (DRONE_NOT_AT_PICKUP), NOT_FOUND (MISSION_NOT_FOUND).
+  rpc ConfirmLoaded(ConfirmLoadedRequest) returns (ConfirmLoadedResponse);
+
+  // Zones and drones with their latest known state, for the live map.
+  // Callers: map.
+  rpc GetFleetSnapshot(GetFleetSnapshotRequest) returns (GetFleetSnapshotResponse);
+}
+
+enum MissionState {
+  MISSION_STATE_UNSPECIFIED = 0;
+  // dispatch.request received; looking for a drone.
+  MISSION_STATE_REQUESTED = 1;
+  MISSION_STATE_ASSIGNED = 2;
+  MISSION_STATE_AT_PICKUP = 3;
+  MISSION_STATE_VISUAL_LOCK = 4;
+  MISSION_STATE_PICKED_UP = 5;
+  MISSION_STATE_DELIVERED = 6;
+  MISSION_STATE_PICKUP_FAILED = 7;
+  MISSION_STATE_ABORTED = 8;
+  // No drone became free within 10 minutes.
+  MISSION_STATE_NO_DRONE = 9;
+  MISSION_STATE_RECALLED = 10;
+}
+
+message Mission {
+  // commerce-service orders.id. One mission per order.
+  string order_id = 1;
+  MissionState state = 2;
+  // Empty until assigned.
+  string zone = 3;
+  string drone_id = 4;
+  dronedrop.common.v1.LatLon pickup = 5;
+  string pickup_point_id = 6;
+  dronedrop.common.v1.LatLon dropoff = 7;
+  int32 payload_g = 8;
+  // Assignment attempts so far, across zones.
+  int32 attempts = 9;
+  // Seconds until delivery, when known.
+  int32 eta_seconds = 10;
+  google.protobuf.Timestamp requested_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+}
+
+message GetMissionRequest {
+  string order_id = 1;
+}
+
+message GetMissionResponse {
+  Mission mission = 1;
+}
+
+message RecallMissionRequest {
+  string order_id = 1;
+  string reason = 2;
+}
+
+message RecallMissionResponse {
+  Mission mission = 1;
+}
+
+message ConfirmLoadedRequest {
+  string order_id = 1;
+  string business_id = 2;
+  // auth-service users.id of the business member who loaded the drone.
+  string member_sub = 3;
+}
+
+message ConfirmLoadedResponse {
+  Mission mission = 1;
+}
+
+message GetFleetSnapshotRequest {}
+
+message Zone {
+  // e.g. "sea-north".
+  string zone_id = 1;
+  // False while the zone's uplink to the hub is down.
+  bool uplink_connected = 2;
+  google.protobuf.Timestamp last_heard_at = 3;
+}
+
+message GetFleetSnapshotResponse {
+  repeated Zone zones = 1;
+  // Latest telemetry sample per drone.
+  repeated dronedrop.edge.v1.Telemetry drones = 2;
+}
