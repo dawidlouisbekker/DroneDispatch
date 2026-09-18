@@ -1,0 +1,568 @@
+openapi: 3.1.0
+info:
+  title: Drone Drop merchant API
+  version: 0.1.0
+  description: |
+    Public JSON API for the merchant portal area of `ui/app`, served by merchant-service under `/v1`
+    and exposed through ui-gateway at `/api/merchant`.
+
+    Every operation needs a Bearer access token issued by auth-service with audience
+    `<APP>/api/merchant` and scope `merchant`. Merchant logins always require a passkey. The caller
+    must be a member of the business in the path.
+
+    merchant-service is the write side of the catalog: changes made here are published as state
+    events and served to customers by catalog-read-service (`catalog.yaml`). Orders arrive from
+    user-service; decisions are published as `merchant.fulfilment.*` events.
+
+    Errors use `application/problem+json`, with the gRPC `ErrorInfo` reason in `reason` when
+    there is one.
+servers:
+  - url: http://localhost:8086/api/merchant
+    description: Local ui-gateway
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/businesses:
+    get:
+      operationId: listBusinesses
+      summary: Businesses the signed-in member belongs to
+      responses:
+        '200':
+          description: The businesses
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [businesses]
+                properties:
+                  businesses:
+                    type: array
+                    items: { $ref: '#/components/schemas/Business' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/businesses/{businessId}/orders:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    get:
+      operationId: listBoardOrders
+      summary: Orders board, newest first
+      parameters:
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/BoardOrderStatus' }
+      responses:
+        '200':
+          description: Board orders
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [orders]
+                properties:
+                  orders:
+                    type: array
+                    items: { $ref: '#/components/schemas/BoardOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/orders/{orderId}/accept:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: acceptOrder
+      summary: Accept an order
+      description: |
+        Publishes `merchant.fulfilment.<order_id>.accepted`; user-service then captures the payment and
+        requests a drone. Reasons: `ORDER_NOT_AWAITING_DECISION`, `ACCEPT_WINDOW_EXPIRED`.
+      responses:
+        '200':
+          description: The updated board order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BoardOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/businesses/{businessId}/orders/{orderId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: rejectOrder
+      summary: Reject an order
+      description: 'Releases the stock and publishes `merchant.fulfilment.<order_id>.rejected`; user-service voids the payment. Reasons: `ORDER_NOT_AWAITING_DECISION`.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, example: out of oat milk }
+      responses:
+        '200':
+          description: The updated board order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BoardOrder' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/businesses/{businessId}/menu:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    get:
+      operationId: getMenu
+      summary: Menu sections and items, including unavailable ones
+      responses:
+        '200':
+          description: The menu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Menu' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/menu/sections:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    post:
+      operationId: createMenuSection
+      summary: Add a menu section
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, minLength: 1 }
+      responses:
+        '201':
+          description: The section
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MenuSection' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/menu/items:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    post:
+      operationId: createMenuItem
+      summary: Add a menu item
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuItemInput' }
+      responses:
+        '201':
+          description: The item
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MenuItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/menu/items/{itemId}:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+      - name: itemId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      operationId: updateMenuItem
+      summary: Change an item (price, stock, availability…)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MenuItemPatch' }
+      responses:
+        '200':
+          description: The item
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MenuItem' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/station:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    get:
+      operationId: getStation
+      summary: The business's active pickup station
+      responses:
+        '200':
+          description: The station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: registerStation
+      summary: Register the station at the pickup pad
+      description: |
+        The station's key pair is generated on the device; only the public key is sent, and drones pin
+        its SHA-256. The new station is `PENDING` until it proves it holds the key, then replaces the
+        active one. The response carries the zone fleet CA certificate the station uses to verify drones.
+        Reasons: `KEY_ALREADY_REGISTERED`, `OUTSIDE_DELIVERY_AREA`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StationInput' }
+      responses:
+        '200':
+          description: The station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StationRegistration' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/businesses/{businessId}/payouts/status:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    get:
+      operationId: getPayoutStatus
+      summary: Stripe payout onboarding status
+      description: "The business's Stripe Connect account status."
+      responses:
+        '200':
+          description: Status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PayoutStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/businesses/{businessId}/payouts/onboarding-link:
+    parameters:
+      - $ref: '#/components/parameters/BusinessId'
+    post:
+      operationId: createOnboardingLink
+      summary: Stripe-hosted onboarding link (open in the system browser)
+      description: 'Creates the Stripe Connect account if needed. The link is single-use and expires in minutes.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [return_url, refresh_url]
+              properties:
+                return_url: { type: string }
+                refresh_url: { type: string }
+      responses:
+        '200':
+          description: The link
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RedirectLink' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/orders/live:
+    get:
+      operationId: liveBoard
+      summary: WebSocket with live orders-board updates
+      description: |
+        Upgrade to a WebSocket. The first client message must be
+        `{"type":"auth","token":"<access token>","business_id":"<uuid>"}` within 5 seconds, or the
+        server closes the socket (code 4401). The server replies `ready`, then sends a `board_order`
+        message whenever an order for that business is created or changes.
+      security: []
+      responses:
+        '101':
+          description: Switching protocols. Messages are `BoardClientMessage` (client) and `BoardServerMessage` (server).
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    BusinessId:
+      name: businessId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid access token
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Not a member of this business, or MFA missing
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Rejected for a business reason
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        reason: { type: string }
+
+    Money:
+      type: object
+      required: [amount_cents, currency]
+      properties:
+        amount_cents: { type: integer, format: int64 }
+        currency: { type: string, example: usd }
+
+    LatLon:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lon: { type: number, minimum: -180, maximum: 180 }
+
+    BusinessStatus:
+      type: string
+      enum: [PENDING, ACTIVE, SUSPENDED]
+
+    Business:
+      type: object
+      required: [business_id, name, address, position, status, role, accepting_orders, payments_enabled]
+      properties:
+        business_id: { type: string, format: uuid }
+        name: { type: string }
+        address: { type: string }
+        position: { $ref: '#/components/schemas/LatLon' }
+        status: { $ref: '#/components/schemas/BusinessStatus' }
+        role: { type: string, enum: [OWNER, STAFF] }
+        accepting_orders: { type: boolean }
+        payments_enabled: { type: boolean }
+        prep_time_minutes: { type: integer }
+
+    BoardOrderStatus:
+      type: string
+      enum: [AWAITING_DECISION, ACCEPTED, REJECTED, EXPIRED, CANCELLED, LOADED]
+
+    BoardLineItem:
+      type: object
+      required: [item_id, name, qty]
+      properties:
+        item_id: { type: string, format: uuid }
+        name: { type: string }
+        qty: { type: integer, minimum: 1 }
+
+    BoardOrder:
+      type: object
+      required: [order_id, business_id, status, items, total, accept_by, created_at]
+      properties:
+        order_id: { type: string, format: uuid }
+        business_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/BoardOrderStatus' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/BoardLineItem' }
+        total: { $ref: '#/components/schemas/Money' }
+        accept_by: { type: string, format: date-time }
+        decided_at: { type: [string, 'null'], format: date-time }
+        loaded_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+
+    Menu:
+      type: object
+      required: [sections]
+      properties:
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/MenuSection' }
+
+    MenuSection:
+      type: object
+      required: [section_id, name, position, items]
+      properties:
+        section_id: { type: string, format: uuid }
+        name: { type: string }
+        position: { type: integer }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/MenuItem' }
+
+    MenuItem:
+      type: object
+      required: [item_id, section_id, name, spoken_name, description, price, weight_g, available]
+      properties:
+        item_id: { type: string, format: uuid }
+        section_id: { type: string, format: uuid }
+        name: { type: string }
+        spoken_name: { type: string, description: What Alexa+ reads out. }
+        description: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        weight_g: { type: integer, minimum: 1 }
+        stock_qty:
+          type: [integer, 'null']
+          minimum: 0
+          description: '`null` means unlimited.'
+        available: { type: boolean }
+
+    MenuItemInput:
+      type: object
+      required: [section_id, name, price, weight_g]
+      properties:
+        section_id: { type: string, format: uuid }
+        name: { type: string, minLength: 1 }
+        spoken_name: { type: string, minLength: 1, description: What Alexa+ reads out. Defaults to the name. }
+        description: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        weight_g: { type: integer, minimum: 1 }
+        stock_qty: { type: [integer, 'null'], minimum: 0 }
+        available: { type: boolean, default: true }
+
+    MenuItemPatch:
+      type: object
+      properties:
+        name: { type: string, minLength: 1 }
+        spoken_name: { type: string, minLength: 1 }
+        description: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        weight_g: { type: integer, minimum: 1 }
+        stock_qty: { type: [integer, 'null'], minimum: 0 }
+        available: { type: boolean }
+
+    StationStatus:
+      type: string
+      enum: [PENDING, ACTIVE, RETIRED]
+
+    AccessNetwork:
+      type: object
+      description: One way to reach a station. Bluetooth LE for now; more kinds will be added.
+      required: [kind, service_uuid, station_tag, l2cap_psm]
+      properties:
+        kind: { type: string, enum: [BLUETOOTH_LE] }
+        service_uuid: { type: string, format: uuid }
+        station_tag: { type: string, description: Hex-encoded tag the station advertises. }
+        l2cap_psm: { type: integer, minimum: 1 }
+
+    Station:
+      type: object
+      required: [station_id, position, position_accuracy_m, status, public_key_sha256, access_networks]
+      properties:
+        station_id: { type: string, format: uuid }
+        position: { $ref: '#/components/schemas/LatLon' }
+        position_accuracy_m: { type: number, exclusiveMinimum: 0 }
+        status: { $ref: '#/components/schemas/StationStatus' }
+        public_key_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        access_networks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AccessNetwork' }
+        activated_at: { type: [string, 'null'], format: date-time }
+
+    StationInput:
+      type: object
+      required: [position, position_accuracy_m, public_key, access_networks]
+      properties:
+        position: { $ref: '#/components/schemas/LatLon' }
+        position_accuracy_m: { type: number, exclusiveMinimum: 0 }
+        public_key:
+          type: string
+          contentEncoding: base64
+          description: DER SubjectPublicKeyInfo of the station's TLS key.
+        access_networks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AccessNetwork' }
+
+    StationRegistration:
+      type: object
+      required: [station, fleet_ca_certificate_pem]
+      properties:
+        station: { $ref: '#/components/schemas/Station' }
+        fleet_ca_certificate_pem:
+          type: string
+          description: The zone fleet CA certificate the station uses to verify drones.
+
+    PayoutStatus:
+      type: object
+      required: [onboarding_started, transfers_enabled]
+      properties:
+        onboarding_started: { type: boolean }
+        transfers_enabled:
+          type: boolean
+          description: The Stripe `stripe_transfers` capability is active, so the shop can take orders.
+
+    RedirectLink:
+      type: object
+      required: [url, expires_at]
+      properties:
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+
+    BoardClientMessage:
+      type: object
+      required: [type, token, business_id]
+      properties:
+        type: { type: string, const: auth }
+        token: { type: string }
+        business_id: { type: string, format: uuid }
+
+    BoardServerMessage:
+      oneOf:
+        - type: object
+          required: [type]
+          properties:
+            type: { type: string, const: ready }
+        - type: object
+          required: [type, order]
+          properties:
+            type: { type: string, const: board_order }
+            order: { $ref: '#/components/schemas/BoardOrder' }
+        - type: object
+          required: [type, title]
+          properties:
+            type: { type: string, const: error }
+            title: { type: string }
+      discriminator:
+        propertyName: type

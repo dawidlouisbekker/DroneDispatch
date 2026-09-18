@@ -1,0 +1,116 @@
+// catalog-read-service internal API: the read side of the catalog (CQRS). One instance
+// runs in each edge zone and serves projections of merchant-service's state events.
+// Catalogs are keyed by the Amazon Location place ID the business claimed during
+// onboarding, so MCP tools can join SearchNearby results to catalogs. Nothing here
+// changes state: commands go to merchant-service (merchant.proto).
+syntax = "proto3";
+
+package dronedrop.catalog.v1;
+
+import "dronedrop/common/v1/common.proto";
+import "google/protobuf/timestamp.proto";
+
+service CatalogRead {
+  // Catalogs for the given place IDs. Place IDs without a Drone Drop catalog are
+  // left out, so callers can pass SearchNearby results straight in.
+  // Callers: user.
+  rpc BatchGetCatalogsByPlaceIds(BatchGetCatalogsByPlaceIdsRequest) returns (BatchGetCatalogsByPlaceIdsResponse);
+
+  // Callers: user.
+  // Errors: NOT_FOUND (CATALOG_NOT_FOUND).
+  rpc GetCatalog(GetCatalogRequest) returns (GetCatalogResponse);
+
+  // Callers: user.
+  // Errors: NOT_FOUND (CATALOG_NOT_FOUND).
+  rpc GetMenu(GetMenuRequest) returns (GetMenuResponse);
+
+  // For display only: prices and stock may lag. merchant-service re-prices orders.
+  // Callers: user.
+  // Errors: NOT_FOUND (CATALOG_NOT_FOUND).
+  rpc BatchGetItems(BatchGetItemsRequest) returns (BatchGetItemsResponse);
+}
+
+// A business's catalog as customers see it.
+message Catalog {
+  // Amazon Location place ID the business claimed (GetPlace with IntendedUse=Storage).
+  string place_id = 1;
+  // merchant-service businesses.id.
+  string business_id = 2;
+  // What Alexa+ reads out, e.g. "Joe's Coffee".
+  string spoken_name = 3;
+  string address = 4;
+  dronedrop.common.v1.LatLon position = 5;
+  // Amazon Location category ids, e.g. "coffee_shop".
+  repeated string categories = 6;
+  // ACTIVE, accepting orders, payouts enabled, and an active station.
+  bool accepting_orders = 7;
+  int32 prep_time_minutes = 8;
+  google.protobuf.Timestamp updated_at = 9;
+}
+
+message CatalogSection {
+  // merchant-service menu_sections.id.
+  string section_id = 1;
+  string place_id = 2;
+  string name = 3;
+  int32 position = 4;
+  // Filled in GetMenu responses; empty in state events.
+  repeated CatalogItem items = 5;
+}
+
+message CatalogItem {
+  // merchant-service menu_items.id.
+  string item_id = 1;
+  string place_id = 2;
+  string section_id = 3;
+  string name = 4;
+  // What Alexa+ reads out, e.g. "large oat latte".
+  string spoken_name = 5;
+  string description = 6;
+  dronedrop.common.v1.Money price = 7;
+  // Weight of one unit, for the drone payload limit.
+  int32 weight_g = 8;
+  // Marked available and, when stock is tracked, stock remaining.
+  bool available = 9;
+  // Units left. Unset means unlimited.
+  optional int32 stock_remaining = 10;
+}
+
+message BatchGetCatalogsByPlaceIdsRequest {
+  repeated string place_ids = 1;
+  // Leave out catalogs that are not accepting orders.
+  bool accepting_orders_only = 2;
+}
+
+message BatchGetCatalogsByPlaceIdsResponse {
+  repeated Catalog catalogs = 1;
+}
+
+message GetCatalogRequest {
+  string place_id = 1;
+}
+
+message GetCatalogResponse {
+  Catalog catalog = 1;
+}
+
+message GetMenuRequest {
+  string place_id = 1;
+  // Optional case-insensitive filter on item names and descriptions.
+  string query = 2;
+  bool include_unavailable = 3;
+}
+
+message GetMenuResponse {
+  Catalog catalog = 1;
+  repeated CatalogSection sections = 2;
+}
+
+message BatchGetItemsRequest {
+  string place_id = 1;
+  repeated string item_ids = 2;
+}
+
+message BatchGetItemsResponse {
+  repeated CatalogItem items = 1;
+}

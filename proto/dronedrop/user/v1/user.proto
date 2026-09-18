@@ -1,0 +1,35 @@
+// user-service types. user-service has no internal gRPC API: customers reach it over
+// HTTP (the app) and MCP (Alexa+), and other services reach it over NATS. These are the
+// values it records for orders.
+syntax = "proto3";
+
+package dronedrop.user.v1;
+
+// The order saga. See "State machines" in docs/ARCHITECTURE.md.
+enum OrderState {
+  ORDER_STATE_UNSPECIFIED = 0;
+  // A voice order above the customer's approval threshold, waiting for approval in the app.
+  ORDER_STATE_AWAITING_APPROVAL = 1;
+  ORDER_STATE_AUTHORIZING = 2;
+  ORDER_STATE_AWAITING_MERCHANT = 3;
+  ORDER_STATE_CAPTURING = 4;
+  // Set only by a verified payment webhook.
+  ORDER_STATE_PAID = 5;
+  ORDER_STATE_DISPATCH_REQUESTED = 6;
+  ORDER_STATE_DRONE_ASSIGNED = 7;
+  ORDER_STATE_AT_PICKUP = 8;
+  ORDER_STATE_PICKED_UP = 9;
+  ORDER_STATE_DELIVERED = 10;
+  ORDER_STATE_COMPLETED = 11;
+  ORDER_STATE_PAYMENT_FAILED = 12;
+  ORDER_STATE_CANCELLED = 13;
+  ORDER_STATE_REFUNDED = 14;
+}
+
+// Where an order was placed.
+enum OrderChannel {
+  ORDER_CHANNEL_UNSPECIFIED = 0;
+  ORDER_CHANNEL_APP = 1;
+  // Alexa+ through the MCP server. Subject to the spend policy.
+  ORDER_CHANNEL_MCP = 2;
+}

@@ -1,86 +1,114 @@
--- dispatch-service: missions (one per paid order), their assignment attempts,
--- the mission event history, and the outbox/inbox. See docs/DATABASE.md.
--- Edge zones and drones are static config and live telemetry, not tables.
+-- dispatch-service schema (databases `dispatch_<zone>`, one per edge zone): the zone's
+-- drone fleet — docks, drones, missions and station handshakes — plus the outbox and
+-- inbox. See docs/DATABASE.md. This set replaces the v1 cloud `dispatch` schema, which
+-- lived in a different database.
 
--- One drone mission per commerce order, created from dispatch.request.
+-- Charging and launch docks, from the zone's fleet config.
+CREATE TABLE docks (
+    id         text PRIMARY KEY CHECK (length(id) > 0),   -- e.g. 'hub-fremont'
+    lat        double precision NOT NULL CHECK (lat BETWEEN -90 AND 90),
+    lon        double precision NOT NULL CHECK (lon BETWEEN -180 AND 180),
+    capacity   integer NOT NULL CHECK (capacity > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE drones (
+    id                 text PRIMARY KEY CHECK (length(id) > 0),   -- e.g. 'drone-07'
+    dock_id            text NOT NULL REFERENCES docks (id) ON DELETE RESTRICT,
+    model              text NOT NULL CHECK (length(model) > 0),
+    max_payload_g      integer NOT NULL CHECK (max_payload_g BETWEEN 1 AND 2500),
+    status             text NOT NULL DEFAULT 'IDLE'
+                       CHECK (status IN ('IDLE', 'ASSIGNED', 'FLYING', 'CHARGING', 'OUT_OF_SERVICE')),
+    battery_pct        real CHECK (battery_pct BETWEEN 0 AND 100),
+    last_lat           double precision CHECK (last_lat BETWEEN -90 AND 90),
+    last_lon           double precision CHECK (last_lon BETWEEN -180 AND 180),
+    last_seen_at       timestamptz,
+    -- SHA-256 of the drone's TLS client certificate, issued by the zone fleet CA.
+    certificate_sha256 text NOT NULL UNIQUE CHECK (certificate_sha256 ~ '^[0-9a-f]{64}$'),
+    version            integer NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at         timestamptz NOT NULL DEFAULT now(),
+    updated_at         timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT drones_position_pair CHECK ((last_lat IS NULL) = (last_lon IS NULL))
+);
+CREATE INDEX drones_dock_id ON drones (dock_id);
+-- Free drones, for assignment.
+CREATE INDEX drones_idle ON drones (dock_id) WHERE status = 'IDLE';
+
+-- One mission per order, created from dispatch.<zone>.request. Each leg keeps what the drone
+-- needs to find and authenticate its station, copied from the request.
 CREATE TABLE missions (
-    order_id            uuid PRIMARY KEY,
+    order_id                  uuid PRIMARY KEY,
     -- DispatchRequest.request_id: a redelivered request cannot create a second mission.
-    dispatch_request_id uuid NOT NULL UNIQUE,
-    state               text NOT NULL DEFAULT 'REQUESTED'
-                        CHECK (state IN ('REQUESTED', 'ASSIGNED', 'AT_PICKUP', 'VISUAL_LOCK', 'PICKED_UP',
-                                         'DELIVERED', 'PICKUP_FAILED', 'ABORTED', 'NO_DRONE', 'RECALLED')),
-    -- NULL until an edge zone accepts the mission and picks a drone.
-    zone                text CHECK (length(zone) > 0),
-    drone_id            text CHECK (length(drone_id) > 0),
+    dispatch_request_id       uuid NOT NULL UNIQUE,
+    drone_id                  text REFERENCES drones (id) ON DELETE RESTRICT,
+    state                     text NOT NULL DEFAULT 'REQUESTED'
+                              CHECK (state IN ('REQUESTED', 'ASSIGNED', 'AT_PICKUP', 'PICKED_UP', 'AT_DROPOFF', 'DELIVERED',
+                                               'STATION_FAILED', 'ABORTED', 'NO_DRONE', 'RECALLED')),
+    payload_g                 integer NOT NULL CHECK (payload_g > 0 AND payload_g <= 2500),
 
-    -- Copied from dispatch.request.
-    pickup_lat          double precision NOT NULL CHECK (pickup_lat BETWEEN -90 AND 90),
-    pickup_lon          double precision NOT NULL CHECK (pickup_lon BETWEEN -180 AND 180),
-    pickup_point_id     uuid NOT NULL,
-    asset_key           text NOT NULL CHECK (length(asset_key) > 0),
-    dropoff_lat         double precision NOT NULL CHECK (dropoff_lat BETWEEN -90 AND 90),
-    dropoff_lon         double precision NOT NULL CHECK (dropoff_lon BETWEEN -180 AND 180),
-    payload_g           integer NOT NULL CHECK (payload_g > 0 AND payload_g <= 2500),
+    -- Pickup leg: the business station.
+    pickup_station_id         uuid NOT NULL,
+    pickup_lat                double precision NOT NULL CHECK (pickup_lat BETWEEN -90 AND 90),
+    pickup_lon                double precision NOT NULL CHECK (pickup_lon BETWEEN -180 AND 180),
+    pickup_accuracy_m         real NOT NULL CHECK (pickup_accuracy_m > 0),
+    pickup_public_key_sha256  text NOT NULL CHECK (pickup_public_key_sha256 ~ '^[0-9a-f]{64}$'),
+    -- dronedrop.station.v1.AccessNetwork list, in the order the drone tries them.
+    pickup_access_networks    jsonb NOT NULL CHECK (
+        CASE WHEN jsonb_typeof(pickup_access_networks) = 'array' THEN jsonb_array_length(pickup_access_networks) > 0 ELSE false END
+    ),
 
-    attempts            integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
-    eta_seconds         integer CHECK (eta_seconds >= 0),
-    requested_at        timestamptz NOT NULL DEFAULT now(),
-    assigned_at         timestamptz,
-    completed_at        timestamptz,
-    version             integer NOT NULL DEFAULT 0,
-    created_at          timestamptz NOT NULL DEFAULT now(),
-    updated_at          timestamptz NOT NULL DEFAULT now(),
+    -- Drop-off leg: the customer's station.
+    dropoff_station_id        uuid NOT NULL,
+    dropoff_lat               double precision NOT NULL CHECK (dropoff_lat BETWEEN -90 AND 90),
+    dropoff_lon               double precision NOT NULL CHECK (dropoff_lon BETWEEN -180 AND 180),
+    dropoff_accuracy_m        real NOT NULL CHECK (dropoff_accuracy_m > 0),
+    dropoff_public_key_sha256 text NOT NULL CHECK (dropoff_public_key_sha256 ~ '^[0-9a-f]{64}$'),
+    dropoff_access_networks   jsonb NOT NULL CHECK (
+        CASE WHEN jsonb_typeof(dropoff_access_networks) = 'array' THEN jsonb_array_length(dropoff_access_networks) > 0 ELSE false END
+    ),
 
-    -- From ASSIGNED through DELIVERED a drone is flying the mission.
+    attempts                  integer NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    eta_seconds               integer CHECK (eta_seconds >= 0),
+    requested_at              timestamptz NOT NULL DEFAULT now(),
+    assigned_at               timestamptz,
+    completed_at              timestamptz,
+    version                   integer NOT NULL DEFAULT 0 CHECK (version >= 0),
+    created_at                timestamptz NOT NULL DEFAULT now(),
+    updated_at                timestamptz NOT NULL DEFAULT now(),
+
+    -- From ASSIGNED until delivery a drone is flying the mission.
     CONSTRAINT missions_flying_has_drone CHECK (
-        state NOT IN ('ASSIGNED', 'AT_PICKUP', 'VISUAL_LOCK', 'PICKED_UP', 'DELIVERED')
-        OR (zone IS NOT NULL AND drone_id IS NOT NULL)
+        state NOT IN ('ASSIGNED', 'AT_PICKUP', 'PICKED_UP', 'AT_DROPOFF', 'DELIVERED') OR drone_id IS NOT NULL
     )
 );
-COMMENT ON COLUMN missions.order_id IS 'ref: commerce.orders.id';
-COMMENT ON COLUMN missions.dispatch_request_id IS 'ref: commerce.outbox.id';
-COMMENT ON COLUMN missions.pickup_point_id IS 'ref: merchant.pickup_points.id';
-COMMENT ON COLUMN missions.asset_key IS 'Key of the verified marker photo in the PICKUP_ASSETS object store';
-
+COMMENT ON COLUMN missions.order_id IS 'ref: user_service.orders.id';
+COMMENT ON COLUMN missions.dispatch_request_id IS 'ref: user_service.outbox.id';
+COMMENT ON COLUMN missions.pickup_station_id IS 'ref: merchant.stations.id';
+COMMENT ON COLUMN missions.dropoff_station_id IS 'ref: user_service.stations.id';
 -- Missions still waiting for a drone, oldest first (retries and the 10-minute NO_DRONE timeout).
 CREATE INDEX missions_waiting ON missions (requested_at) WHERE state = 'REQUESTED';
-CREATE INDEX missions_pickup_point_id ON missions (pickup_point_id);
--- The mission a drone is currently flying (telemetry, handoff). Not unique: events for
--- different orders may be applied out of order, briefly showing a drone on two missions.
-CREATE INDEX missions_active_drone ON missions (drone_id)
-    WHERE state IN ('ASSIGNED', 'AT_PICKUP', 'VISUAL_LOCK', 'PICKED_UP');
+CREATE INDEX missions_drone_id ON missions (drone_id);
 
--- Each try to get a drone for a mission, across zones.
-CREATE TABLE mission_attempts (
-    id         uuid PRIMARY KEY,
-    order_id   uuid NOT NULL REFERENCES missions (order_id) ON DELETE CASCADE,
-    attempt    integer NOT NULL CHECK (attempt > 0),
-    zone       text NOT NULL CHECK (length(zone) > 0),
-    result     text NOT NULL CHECK (result IN ('ASSIGNED', 'NO_FREE_DRONE', 'ZONE_UNREACHABLE', 'TIMED_OUT')),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    UNIQUE (order_id, attempt)   -- also serves as the order_id foreign key index
+-- Every attempt to authenticate a station.
+CREATE TABLE station_handshakes (
+    id             uuid PRIMARY KEY,
+    order_id       uuid NOT NULL REFERENCES missions (order_id) ON DELETE CASCADE,
+    drone_id       text NOT NULL REFERENCES drones (id) ON DELETE RESTRICT,
+    leg            text NOT NULL CHECK (leg IN ('PICKUP', 'DROPOFF')),
+    station_id     uuid NOT NULL,
+    -- dronedrop.station.v1.AccessNetwork case used. Widen with the missions' networks.
+    access_network text NOT NULL CHECK (access_network IN ('BLUETOOTH_LE')),
+    ranging_method text NOT NULL CHECK (ranging_method IN ('GNSS', 'RSSI', 'CHANNEL_SOUNDING')),
+    distance_m     real CHECK (distance_m >= 0),
+    result         text NOT NULL
+                   CHECK (result IN ('VERIFIED', 'NOT_FOUND', 'KEY_MISMATCH', 'TLS_FAILED', 'REJECTED', 'TIMEOUT')),
+    detail         text CHECK (length(detail) > 0),
+    attempted_at   timestamptz NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now()
 );
-
--- History of MissionEvents received from edge nodes (and NO_DRONE published by dispatch).
-CREATE TABLE mission_events (
-    -- MissionEvent.event_id: a replayed event conflicts.
-    event_id    uuid PRIMARY KEY,
-    order_id    uuid NOT NULL REFERENCES missions (order_id) ON DELETE CASCADE,
-    kind        text NOT NULL
-                CHECK (kind IN ('ASSIGNED', 'AT_PICKUP', 'VISUAL_LOCK', 'PICKUP_FAILED', 'PICKED_UP',
-                                'DELIVERED', 'ABORTED', 'NO_DRONE')),
-    -- NULL when the event has none, e.g. NO_DRONE.
-    zone        text CHECK (length(zone) > 0),
-    drone_id    text CHECK (length(drone_id) > 0),
-    lat         double precision CHECK (lat BETWEEN -90 AND 90),
-    lon         double precision CHECK (lon BETWEEN -180 AND 180),
-    detail      text CHECK (length(detail) > 0),
-    occurred_at timestamptz NOT NULL,
-    received_at timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT mission_events_position_pair CHECK ((lat IS NULL) = (lon IS NULL))
-);
-CREATE INDEX mission_events_order_occurred ON mission_events (order_id, occurred_at);
+CREATE INDEX station_handshakes_order_attempted ON station_handshakes (order_id, attempted_at);
+CREATE INDEX station_handshakes_drone_id ON station_handshakes (drone_id);
 
 CREATE TABLE outbox (
     id           uuid PRIMARY KEY,          -- also the Nats-Msg-Id, so JetStream drops duplicates

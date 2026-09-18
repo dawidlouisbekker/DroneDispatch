@@ -1,60 +1,32 @@
-// merchant-service internal API: the shop catalog, stock holds and pickup points.
+// merchant-service internal API: the write side for businesses. user-service uses it to
+// price and submit orders; businesses manage their catalog through the merchant HTTP API.
+// Catalog reads are served by catalog-read-service (catalog.proto).
 syntax = "proto3";
 
 package dronedrop.merchant.v1;
 
 import "dronedrop/common/v1/common.proto";
+import "dronedrop/station/v1/station.proto";
 import "google/protobuf/timestamp.proto";
 
-// Registered shops and their menus.
-service ShopCatalog {
-  // Registered shops within a radius, nearest first.
-  // Callers: dispatch.
-  rpc SearchShopsNear(SearchShopsNearRequest) returns (SearchShopsNearResponse);
+// The business side of an order.
+service Fulfilment {
+  // Authoritative prices, weights and stock for a cart. Holds nothing.
+  // Callers: user.
+  // Errors: NOT_FOUND (CATALOG_NOT_FOUND, ITEM_NOT_FOUND),
+  // FAILED_PRECONDITION (MERCHANT_NOT_ACCEPTING, OUT_OF_STOCK, OVER_PAYLOAD_LIMIT).
+  rpc PriceOrder(PriceOrderRequest) returns (PriceOrderResponse);
 
-  // Joins Amazon Location place ids (from SearchNearby or SearchText) with
-  // registered shops. Place ids without a shop are left out.
-  // Callers: dispatch.
-  rpc BatchGetShopsByPlaceIds(BatchGetShopsByPlaceIdsRequest) returns (BatchGetShopsByPlaceIdsResponse);
+  // Reserves stock and puts the order on the business's board with its accept window.
+  // Idempotent on order_id.
+  // Callers: user.
+  // Errors: as PriceOrder, plus FAILED_PRECONDITION (PRICE_CHANGED, NO_ACTIVE_STATION).
+  rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
 
-  // Callers: dispatch, commerce, map.
-  // Errors: NOT_FOUND (SHOP_NOT_FOUND).
-  rpc GetShop(GetShopRequest) returns (GetShopResponse);
-
-  // Callers: dispatch.
-  // Errors: NOT_FOUND (SHOP_NOT_FOUND).
-  rpc GetMenu(GetMenuRequest) returns (GetMenuResponse);
-
-  // Authoritative price, weight and availability for quoting.
-  // Callers: commerce.
-  // Errors: NOT_FOUND (SHOP_NOT_FOUND, ITEM_NOT_FOUND when any item is not on this shop's menu).
-  rpc BatchGetMenuItems(BatchGetMenuItemsRequest) returns (BatchGetMenuItemsResponse);
-}
-
-// Stock held for a quote, and later for the order placed from it.
-service Stock {
-  // Holds stock under `quote_id`, replacing any hold already under that id.
-  // commerce calls it when quoting and again with a later `expires_at` when the
-  // order is placed, so stock stays held until the merchant decides.
-  // Idempotent on quote_id.
-  // Callers: commerce.
-  // Errors: FAILED_PRECONDITION (OUT_OF_STOCK, MERCHANT_NOT_ACCEPTING), NOT_FOUND (SHOP_NOT_FOUND, ITEM_NOT_FOUND).
-  rpc ReserveStock(ReserveStockRequest) returns (ReserveStockResponse);
-
-  // Returns held stock. Idempotent: releasing an unknown or already released hold succeeds.
-  // Callers: commerce.
-  rpc ReleaseStock(ReleaseStockRequest) returns (ReleaseStockResponse);
-
-  // Makes a hold permanent once the order is PAID. Idempotent on quote_id.
-  // Callers: commerce.
-  // Errors: FAILED_PRECONDITION (RESERVATION_EXPIRED, RESERVATION_RELEASED), NOT_FOUND (RESERVATION_NOT_FOUND).
-  rpc CommitStock(CommitStockRequest) returns (CommitStockResponse);
-}
-
-service PickupPoints {
-  // Callers: commerce (building dispatch.request), dispatch.
-  // Errors: NOT_FOUND (PICKUP_POINT_NOT_FOUND).
-  rpc GetPickupPoint(GetPickupPointRequest) returns (GetPickupPointResponse);
+  // Releases stock and takes the order off the board, before it is loaded. Idempotent on order_id.
+  // Callers: user.
+  // Errors: FAILED_PRECONDITION (ALREADY_LOADED), NOT_FOUND (ORDER_NOT_FOUND).
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
 }
 
 enum BusinessStatus {
@@ -65,161 +37,75 @@ enum BusinessStatus {
   BUSINESS_STATUS_SUSPENDED = 3;
 }
 
-message Shop {
-  // merchant-service businesses.id.
-  string business_id = 1;
-  // Amazon Location place id the business claimed.
-  string place_id = 2;
-  string name = 3;
-  string address = 4;
-  dronedrop.common.v1.LatLon position = 5;
-  // Amazon Location category ids, e.g. "coffee_shop".
-  repeated string categories = 6;
-  BusinessStatus status = 7;
-  // Taking orders right now: ACTIVE, the accepting toggle is on, and Stripe payments are enabled.
-  bool accepting_orders = 8;
-  int32 prep_time_minutes = 9;
-  // Empty until the business has a VERIFIED pickup point.
-  string pickup_point_id = 10;
+enum FulfilmentStatus {
+  FULFILMENT_STATUS_UNSPECIFIED = 0;
+  FULFILMENT_STATUS_AWAITING_DECISION = 1;
+  FULFILMENT_STATUS_ACCEPTED = 2;
+  FULFILMENT_STATUS_REJECTED = 3;
+  // The business didn't decide within the accept window.
+  FULFILMENT_STATUS_EXPIRED = 4;
+  FULFILMENT_STATUS_CANCELLED = 5;
+  // Handed to the drone at the business station.
+  FULFILMENT_STATUS_LOADED = 6;
 }
 
-message ShopWithDistance {
-  Shop shop = 1;
-  double distance_m = 2;
-}
-
-message SearchShopsNearRequest {
-  dronedrop.common.v1.LatLon center = 1;
-  int32 radius_m = 2;
-  // Optional Amazon Location category id, e.g. "coffee_shop".
-  string category = 3;
-  // Leave out shops that are not accepting orders.
-  bool accepting_orders_only = 4;
-  int32 limit = 5;
-}
-
-message SearchShopsNearResponse {
-  repeated ShopWithDistance shops = 1;
-}
-
-message BatchGetShopsByPlaceIdsRequest {
-  repeated string place_ids = 1;
-}
-
-message BatchGetShopsByPlaceIdsResponse {
-  repeated Shop shops = 1;
-}
-
-message GetShopRequest {
-  string business_id = 1;
-}
-
-message GetShopResponse {
-  Shop shop = 1;
-}
-
-message MenuItem {
-  string item_id = 1;
-  string business_id = 2;
-  string section_id = 3;
-  string name = 4;
-  string description = 5;
-  dronedrop.common.v1.Money price = 6;
-  // Weight of one unit, used for the drone payload limit.
-  int32 weight_g = 7;
-  // Can be ordered now: marked available and stock remaining.
-  bool available = 8;
-  // Units left after holds. Unset means unlimited.
-  optional int32 stock_remaining = 9;
-}
-
-message MenuSection {
-  string section_id = 1;
-  string name = 2;
-  int32 position = 3;
-  repeated MenuItem items = 4;
-}
-
-message GetMenuRequest {
-  string business_id = 1;
-  // Optional case-insensitive filter on item name and description.
-  string query = 2;
-  bool include_unavailable = 3;
-}
-
-message GetMenuResponse {
-  string business_id = 1;
-  repeated MenuSection sections = 2;
-}
-
-message BatchGetMenuItemsRequest {
-  string business_id = 1;
-  repeated string item_ids = 2;
-}
-
-message BatchGetMenuItemsResponse {
-  repeated MenuItem items = 1;
-}
-
-message StockLine {
+message OrderLine {
+  // menu_items.id.
   string item_id = 1;
   int32 qty = 2;
 }
 
-message ReserveStockRequest {
-  // commerce-service quotes.id. Also the reservation id.
-  string quote_id = 1;
-  string business_id = 2;
-  repeated StockLine lines = 3;
-  // When the hold lapses unless committed or renewed.
-  google.protobuf.Timestamp expires_at = 4;
+// A line with authoritative values, copied into the customer's order.
+message PricedLine {
+  string item_id = 1;
+  string name = 2;
+  // What Alexa+ reads out.
+  string spoken_name = 3;
+  dronedrop.common.v1.Money unit_price = 4;
+  int32 qty = 5;
+  // Weight of one unit.
+  int32 weight_g = 6;
 }
 
-message ReserveStockResponse {
-  google.protobuf.Timestamp expires_at = 1;
+message PriceOrderRequest {
+  // The catalog's Amazon Location place ID.
+  string place_id = 1;
+  repeated OrderLine lines = 2;
 }
 
-message ReleaseStockRequest {
-  string quote_id = 1;
+message PriceOrderResponse {
+  string business_id = 1;
+  string spoken_name = 2;
+  repeated PricedLine lines = 3;
+  dronedrop.common.v1.Money subtotal = 4;
+  // Total weight; the drone limit is 2500 g.
+  int32 payload_g = 5;
+  int32 prep_time_minutes = 6;
 }
 
-message ReleaseStockResponse {}
-
-message CommitStockRequest {
-  string quote_id = 1;
-  // commerce-service orders.id the stock was sold to.
-  string order_id = 2;
+message SubmitOrderRequest {
+  // user-service orders.id.
+  string order_id = 1;
+  string customer_sub = 2;
+  string place_id = 3;
+  // The lines from PriceOrder. A price that changed since then is rejected (PRICE_CHANGED).
+  repeated PricedLine lines = 4;
+  dronedrop.common.v1.Money subtotal = 5;
 }
 
-message CommitStockResponse {}
-
-enum PickupPointStatus {
-  PICKUP_POINT_STATUS_UNSPECIFIED = 0;
-  // Pin placed; waiting for a photo of the printed marker.
-  PICKUP_POINT_STATUS_PENDING_PHOTO = 1;
-  PICKUP_POINT_STATUS_VERIFIED = 2;
-  PICKUP_POINT_STATUS_REJECTED = 3;
+message SubmitOrderResponse {
+  FulfilmentStatus status = 1;
+  // The business must accept by this time.
+  google.protobuf.Timestamp accept_by = 2;
+  // The business station the drone collects the order from.
+  dronedrop.station.v1.Station pickup_station = 3;
 }
 
-message PickupPoint {
-  // Also encoded in the signed QR marker: ddp:v1:<pickup_point_id>:<hmac>.
-  string pickup_point_id = 1;
-  string business_id = 2;
-  dronedrop.common.v1.LatLon position = 3;
-  PickupPointStatus status = 4;
-  // Key of the verified marker photo in the PICKUP_ASSETS object store.
-  string asset_key = 5;
-  google.protobuf.Timestamp verified_at = 6;
+message CancelOrderRequest {
+  string order_id = 1;
+  string reason = 2;
 }
 
-message GetPickupPointRequest {
-  oneof lookup {
-    string pickup_point_id = 1;
-    // The business's current pickup point.
-    string business_id = 2;
-  }
-}
-
-message GetPickupPointResponse {
-  PickupPoint pickup_point = 1;
+message CancelOrderResponse {
+  FulfilmentStatus status = 1;
 }

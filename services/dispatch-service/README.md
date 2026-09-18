@@ -1,117 +1,84 @@
 # dispatch-service
 
-The **MCP server** Alexa+ talks to, and the fleet orchestrator that turns paid orders into drone missions on the MEC edge zones.
+The drone fleet of one MEC edge zone. One instance runs in each zone (locally `sea-north` and `sea-south`), next to its drones: it turns dispatch requests into missions, flies the drones (simulated), and authenticates the stations at pickup and drop-off.
 
-**Status:** scaffold.
-- `/mcp` serves the full tool list over Streamable HTTP, but every tool returns `not_implemented`.
-- The OAuth protected-resource metadata is served, but JWTs are **not validated yet**, so `/mcp` is open.
-- MCP tools are milestone 5; fleet orchestration is milestone 6.
+Why at the edge: flight control and station handshakes run next to the drones, so latency stays low and a network partition doesn't ground the fleet.
+
+**Status:** scaffold. The service boots, applies its migrations, logs every `dispatch.<zone>.*` command it receives on the zone's NATS leaf, and serves `/healthz`. Missions, the simulator and the station handshake are milestone 6; the MEC demos are milestone 8.
 
 ## Responsibilities
-- **MCP server** (spec 2025-11-25, Streamable HTTP) at `/mcp`, built on [`rmcp`](https://crates.io/crates/rmcp).
-- **OAuth resource server:**
-  - A request without a token gets `401` and a `WWW-Authenticate` header pointing at the protected-resource metadata, which names auth-service.
-  - Every request's JWT is validated against auth-service's JWKS: `iss`, `aud` = `{PUBLIC_URL}/mcp`, `exp`, and the `delivery` scope.
-  - Grants revoked on `auth.events.grant_revoked` are rejected immediately.
-  - Tools read the customer's identity only from the validated JWT.
-- **Shop discovery:** calls Amazon Location Places V2 (`SearchNearby`, `SearchText`, `GetPlace`, `Geocode`) and joins the results with registered merchants from merchant-service.
-- **Fleet orchestration:**
-  - Consumes `dispatch.request` and picks the edge zone that owns the pickup point.
-  - Publishes `cmd.edge.<zone>.assign`, retrying in the neighbouring zone if no drone is free.
-  - Reports `no_drone` after 10 minutes.
-  - Relays `mission.*` events.
+- **Fleet data only:** docks, drones, missions and station handshakes. No customer accounts, catalogs or payments: a mission carries only what the drone needs (station ids, positions, access networks and public-key hashes).
+- **Missions:**
+  - Consume `dispatch.<zone>.request` and assign the nearest free drone with enough payload; retry, and report `no_drone` after 10 minutes.
+  - `dispatch.<zone>.recall` aborts a mission before pickup.
+  - Publish `mission.<order_id>.<event>` through the outbox.
+- **Flight simulation** (10 Hz, deterministic):
+  - States: `IDLE → TAKEOFF → TO_PICKUP → APPROACH → HANDSHAKE → LOADING → TO_DROPOFF → DROPOFF → RETURNING → CHARGING`.
+  - Cruise at 15 m/s and 60 m altitude, with a 25-minute battery and a reserve.
+  - 30 m separation between drones; route around no-fly polygons (starting with KBFI, Boeing Field).
+- **Station handshake** ([ARCHITECTURE.md](../../docs/ARCHITECTURE.md), flow 5):
+  1. Fly to the station's position (GNSS).
+  2. Within about 50 m, scan the station's access networks in order. Bluetooth LE first: match the platform service UUID and the station's tag.
+  3. Open an L2CAP connection-oriented channel and run TLS 1.3 with mutual authentication: accept only the station key pinned in the mission; present the drone's certificate from the zone fleet CA.
+  4. Exchange the mission id and a nonce; the station acknowledges `loaded` or `received`.
+  5. Record every attempt in `station_handshakes` and publish `station_verified` or `station_failed`.
+  - The transport abstraction (`AccessNetwork`) lives in `crates/station`, so Wi-Fi or UWB can be added later.
+- **Partition resilience:** mission events and telemetry buffer in the zone's JetStream domain; requests queued on the hub are delivered when the link returns.
 
-## Owns (Postgres database `dispatch`)
-- `missions`: one per paid order, keyed by `order_id`, with state, zone, drone, pickup and drop-off.
-- `mission_attempts`: each try to assign a drone, per zone.
-- `mission_events`: history of received `MissionEvent`s, keyed by `event_id`.
-- `outbox`, `inbox`.
-
-Migrations in [`migrations/`](migrations/) run at start-up. Conventions and cross-service references: [DATABASE.md](../../docs/DATABASE.md).
-
-## MCP tools
-Alexa runs the conversation with these tools:
-1. Present options.
-2. Adjust the cart until the customer is happy.
-3. Read back the shop, items, total, drop-off location and ETA.
-4. Call `place_order` only after the customer explicitly says yes.
-
-The server `instructions` and each tool description spell out this protocol.
-
-| Tool | Purpose |
-|---|---|
-| `search_nearby_shops(category?, near_location_id?, radius_m?)` | Places `SearchNearby` around a verified delivery location, joined with registered merchants. Unregistered shops come back as "not on Drone Drop". |
-| `search_places(query, near_location_id?)` | Places `SearchText` for a specific shop or address; flags registered merchants. |
-| `get_shop_details(shop_id)` | Places `GetPlace` (address, hours, contacts) merged with the merchant profile, plus distance and ETA. |
-| `get_menu(shop_id, query?)` | Items with price, availability and weight. |
-| `list_past_order_locations(limit?)` | Shops ordered from and drop-off locations used. |
-| `list_order_history(limit?, shop_id?)` | Past orders. |
-| `reorder(order_id)` | Starts a new cart from a past order. |
-| `list_delivery_locations()` | Verified locations, plus any pending verification. |
-| `request_new_delivery_location(address, label)` | Geocodes the address and creates a **pending** location that the customer must verify with MFA in map-service. |
-| `update_cart(shop_id, items, delivery_location_id)` | Replaces the cart and returns a quote: totals, weight check (2.5 kg limit), ETA, and a `quote_id` valid for 10 minutes with stock reserved. |
-| `place_order(quote_id, expected_total_cents, customer_confirmed)` | Authorizes payment by voice. See the checks below. |
-| `get_order_status(order_id?)` | Live status. |
-| `cancel_order(order_id)` | Cancels before pickup: voids or refunds the payment and recalls the drone. |
-
-`place_order` succeeds only if all of these hold (commerce-service enforces them):
-- The quote belongs to the caller's `sub`, is still valid, and `expected_total_cents` matches.
-- The delivery location is verified.
-- The per-order and daily spending caps allow it.
-- A default payment method is on file.
-
-The Stripe idempotency key is the `quote_id`, so a retried call cannot charge twice.
+## Owns (Postgres databases `dispatch_<zone>`)
+Schema in [`migrations/`](migrations/), applied at start-up to the zone's database. Conventions: [DATABASE.md](../../docs/DATABASE.md).
+- `docks`: charging and launch docks
+- `drones`: model, payload limit, status, battery, last position, certificate hash
+- `missions`: one per order, with both legs' station details
+- `station_handshakes`: every authentication attempt
+- `outbox`, `inbox`
 
 ## Interfaces
 **HTTP**
 | Endpoint | Purpose | Status |
 |---|---|---|
-| `POST`/`GET`/`DELETE /mcp` | MCP Streamable HTTP | Scaffold (stub tools, no auth) |
-| `GET /.well-known/oauth-protected-resource/mcp` | Protected-resource metadata (RFC 9728) | Scaffold |
 | `GET /healthz` | Liveness | Done |
 
 **gRPC server** (internal port 9082, [`dispatch.proto`](../../proto/dronedrop/dispatch/v1/dispatch.proto))
 | Service | RPCs | Called by |
 |---|---|---|
-| `Fleet` | `GetMission`, `RecallMission`, `ConfirmLoaded`, `GetFleetSnapshot` | commerce, merchant, map |
+| `Fleet` | `GetFleetSnapshot`, `GetMission` | user (live map) |
 
-**gRPC client of**
-| Service | RPCs used |
-|---|---|
-| merchant `ShopCatalog` | `SearchShopsNear`, `BatchGetShopsByPlaceIds`, `GetShop`, `GetMenu` |
-| commerce `Checkout`, `Orders`, `DeliveryLocations`, `CustomerPayments` | Cart, order, history and delivery-location calls behind the MCP tools |
-| auth `GrantRegistry` | `ListRevokedGrants` at start-up |
-
-**NATS** (payloads from [`fleet_events.proto`](../../proto/dronedrop/events/v1/fleet_events.proto) and [`edge.proto`](../../proto/dronedrop/edge/v1/edge.proto))
+**NATS** (all through the zone's leaf node; payloads from [`fleet_events.proto`](../../proto/dronedrop/events/v1/fleet_events.proto) and `dispatch.proto`)
 | Direction | Subjects | Payload |
 |---|---|---|
-| Consumes | `dispatch.request` (work queue `DISPATCH_REQUESTS`) | `DispatchRequest` |
-| Publishes | `cmd.edge.<zone>.{assign,recall,handoff,loaded}` | `EdgeCommand` |
-| Consumes and relays | `mission.<order_id>.*` (stream `MISSIONS`); publishes `no_drone` itself | `MissionEvent` |
-| Consumes | `TELEMETRY` stream (1 Hz), for `GetFleetSnapshot` | `Telemetry` |
-| Consumes | `auth.events.grant_revoked` | `GrantRevoked` |
+| Consumes | `dispatch.<zone>.request`, `dispatch.<zone>.recall` (stream `DISPATCH_REQUESTS`) | `DispatchRequest`, `RecallMission` |
+| Publishes | `mission.<order_id>.<event>` (stream `MISSIONS`, sourced to the hub) | `MissionEvent` |
+| Publishes | `tlm.raw.<zone>.<drone>` (10 Hz, stays in the zone); `TELEMETRY` stream (1 Hz, synced to the hub) | `Telemetry` |
 
-**External:** Amazon Location Places V2 (`us-west-2`).
+## Network topology (local)
+```
+dispatch-sea-north, catalog-read-sea-north → nats-leaf-sea-north → toxiproxy :7423 → nats-hub :7422
+dispatch-sea-south, catalog-read-sea-south → nats-leaf-sea-south → toxiproxy :7424 → nats-hub :7422
+```
+toxiproxy sits on each zone's uplink, so the demo scripts can cut it or slow it down:
+```bash
+scripts/partition-edge.sh sea-north      # cut the uplink
+scripts/add-latency.sh sea-north 150     # add 150 ms latency
+scripts/heal-edge.sh sea-north           # restore the link and remove latency
+```
 
 ## Configuration
 | Variable | Default | Notes |
 |---|---|---|
+| `EDGE_ZONE` | required | `sea-north` or `sea-south` |
+| `DATABASE_URL` | required | e.g. `postgres://dispatch:dispatch@localhost:5432/dispatch_sea_north` |
+| `NATS_URL` | `nats://localhost:4222` | The zone's leaf node, not the hub (Compose publishes sea-north's on `4223`) |
 | `HTTP_ADDR` | `0.0.0.0:8082` | |
-| `DATABASE_URL` | required | e.g. `postgres://dispatch:dispatch@localhost:5432/dispatch` |
-| `NATS_URL` | `nats://localhost:4222` | |
-| `PUBLIC_URL` | `http://localhost:8082` | The MCP resource is `{PUBLIC_URL}/mcp`. |
-| `AUTH_ISSUER` | `http://localhost:8081` | Listed in the protected-resource metadata. |
-| `MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1` | `Host` headers accepted on `/mcp` (DNS-rebinding protection). Add the tunnel hostname. |
-
-Planned: `GRPC_ADDR` (`0.0.0.0:9082`), plus AWS credentials and `AWS_REGION` for Places.
 
 ## Run
 ```bash
-docker compose up dispatch-service
-DATABASE_URL=postgres://dispatch:dispatch@localhost:5432/dispatch cargo run -p dispatch-service
+docker compose up dispatch-sea-north
 
-# Browse the tools:
-npx @modelcontextprotocol/inspector   # connect to http://localhost:8082/mcp (Streamable HTTP)
+# Or from source, against the Compose Postgres and the sea-north NATS leaf:
+cp services/dispatch-service/.env.example services/dispatch-service/.env
+cargo run -p dispatch-service
+
+# Send a test command; it shows up in the log:
+nats --server nats://localhost:4223 pub dispatch.sea-north.request '{}'
 ```
-
-For Alexa+, expose the service on the stable `dispatch.` tunnel hostname, set `PUBLIC_URL` and `MCP_ALLOWED_HOSTS` to match, then run `alexa-ai configure-account-linking` and `alexa-ai deploy`.

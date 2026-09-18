@@ -1,31 +1,53 @@
 // Events published by merchant-service (stream MERCHANT_EVENTS).
+//
+// State events carry an aggregate's full current state on its own subject, and the
+// stream keeps only the latest message per subject. catalog-read-service projects them
+// and can rebuild a zone by replaying the stream. See docs/DATABASE.md, "CQRS".
 syntax = "proto3";
 
 package dronedrop.events.v1;
 
-import "dronedrop/common/v1/common.proto";
+import "dronedrop/catalog/v1/catalog.proto";
 import "dronedrop/merchant/v1/merchant.proto";
 import "google/protobuf/timestamp.proto";
 
-// Payload of merchant.business.<business_id>.status_changed. commerce stops
-// quoting a shop that is no longer accepting orders.
-message BusinessStatusChanged {
+// Payload of merchant.state.catalog.<place_id>.
+message CatalogState {
+  // Publisher's outbox id; also the Nats-Msg-Id.
   string event_id = 1;
-  string business_id = 2;
-  dronedrop.merchant.v1.BusinessStatus status = 3;
-  bool accepting_orders = 4;
-  google.protobuf.Timestamp occurred_at = 5;
+  dronedrop.catalog.v1.Catalog catalog = 2;
+  // The catalog was removed; `catalog` holds only its keys.
+  bool deleted = 3;
+  google.protobuf.Timestamp occurred_at = 4;
 }
 
-// Payload of merchant.pickup_point.verified. The photo is now in the
-// PICKUP_ASSETS object store, which is mirrored to the edge zones.
-message PickupPointVerified {
+// Payload of merchant.state.section.<section_id>.
+message CatalogSectionState {
   string event_id = 1;
-  string pickup_point_id = 2;
+  dronedrop.catalog.v1.CatalogSection section = 2;
+  bool deleted = 3;
+  google.protobuf.Timestamp occurred_at = 4;
+}
+
+// Payload of merchant.state.item.<item_id>.
+message CatalogItemState {
+  string event_id = 1;
+  dronedrop.catalog.v1.CatalogItem item = 2;
+  bool deleted = 3;
+  google.protobuf.Timestamp occurred_at = 4;
+}
+
+// Payload of merchant.fulfilment.<order_id>.<event>. The subject's last token is the
+// status in lower case, e.g. merchant.fulfilment.<id>.accepted. user-service captures or
+// voids the payment in response.
+message FulfilmentEvent {
+  string event_id = 1;
+  string order_id = 2;
   string business_id = 3;
-  dronedrop.common.v1.LatLon position = 4;
-  string asset_key = 5;
-  // Hex SHA-256 of the photo, so edges can check their mirrored copy.
-  string photo_sha256 = 6;
-  google.protobuf.Timestamp verified_at = 7;
+  dronedrop.merchant.v1.FulfilmentStatus status = 4;
+  // auth-service users.id of the member who decided, when a member did.
+  string member_sub = 5;
+  // Why, e.g. "out of oat milk".
+  string reason = 6;
+  google.protobuf.Timestamp occurred_at = 7;
 }

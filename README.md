@@ -1,38 +1,44 @@
 # AWS Hackathon
 
 ## Drone Drop
-Voice-commerce drone delivery simulation for Alexa+: an MCP server lets Alexa find shops via Amazon Location Service, build an order conversationally, and pay by voice (Stripe Connect). Drones are dispatched only after the business accepts and payment succeeds.
-Microservices in Rust over NATS, with drone flight simulated on MEC edge zones and a live customer map.
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: scaffolded. Every service builds, boots and serves `/healthz`; features are not implemented yet.
+Voice-commerce drone delivery simulation for Alexa+: an MCP server lets Alexa find shops by category with Amazon Location Service, read out their menus and order by voice. The business accepts the order in its portal; a drone in the business's edge zone collects it from the business's station and delivers it to the customer's station, authenticating both over Bluetooth with mutual TLS.
+Rust microservices over gRPC and NATS, with the catalog's read side and the drone fleet running in MEC edge zones.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Status: auth-service is implemented; the other services are scaffolded (they build, boot and serve `/healthz`).
 
 ## Repository layout
-| Path | What | Local port |
-|---|---|---|
-| [services/auth-service](services/auth-service/README.md) | OAuth 2.1 authorization server, MFA | 8081 |
-| [services/dispatch-service](services/dispatch-service/README.md) | MCP server for Alexa+, drone fleet orchestration | 8082 |
-| [services/merchant-service](services/merchant-service/README.md) | Business registration, menus, stock, pickup markers, portal | 8083 |
-| [services/commerce-service](services/commerce-service/README.md) | Order saga, Stripe Connect, history, delivery locations | 8084 |
-| [services/map-service](services/map-service/README.md) | Customer web app with live drone map | 8085 |
-| [services/edge-node](services/edge-node/README.md) | Flight simulation and marker vision, one per MEC zone | 8091, 8092 |
-| [proto/](proto/dronedrop) | Protobuf contracts: gRPC services and NATS event payloads | |
-| `crates/contracts` | Rust code generated from `proto/`, plus NATS subject names | |
-| [docs/DATABASE.md](docs/DATABASE.md) | Database per service, schema conventions, references across services | |
-| `crates/geo` | Coordinates, distance, ETA | |
-| `crates/svc-auth` | Token claims and `WWW-Authenticate` challenges for resource servers | |
-| `crates/svc-common` | Config, tracing, NATS, Postgres, HTTP server | |
-| `config/` | Postgres init, NATS hub and leaf configs, toxiproxy | |
-| `scripts/` | MEC demo: partition, heal, add latency | |
+| Path | What | Runs | Local port |
+|---|---|---|---|
+| [services/auth-service](services/auth-service/README.md) | OAuth 2.1 authorization server, passkeys | Cloud | 8081 |
+| [services/user-service](services/user-service/README.md) | Customer API, Alexa+ MCP server, orders and order history, pickup locations and stations | Cloud | 8085 |
+| [services/merchant-service](services/merchant-service/README.md) | Business onboarding, catalog and stock (CQRS write side), fulfilment, stations, payouts | Cloud | 8083 |
+| [services/catalog-read-service](services/catalog-read-service/README.md) | Read-only catalogs keyed by Amazon place ID (CQRS read side) | Edge, per zone | 8084 (sea-north), 8094 (sea-south) |
+| [services/dispatch-service](services/dispatch-service/README.md) | Drone fleet: missions, flight simulation, station handshakes | Edge, per zone | 8082 (sea-north), 8092 (sea-south) |
+| `ui/app` | Expo app: customer area and merchant portal | | 8087 (dev server), 8086 (gateway) |
+| [proto/](proto/dronedrop) | Protobuf contracts: gRPC services and NATS event payloads | | |
+| `crates/contracts` | Rust code generated from `proto/`, plus NATS subject names | | |
+| `crates/station` | Station access networks (Bluetooth LE first) and public-key pinning | | |
+| `crates/geo` | Coordinates, distance, ETA | | |
+| `crates/svc-auth` | Token claims and `WWW-Authenticate` challenges for resource servers | | |
+| `crates/svc-common` | Config and `.env` loading, tracing, NATS, Postgres, HTTP server, CORS, outbox | | |
+| [api/openapi](api/openapi) | HTTP APIs: auth, user, merchant, catalog | | |
+| [docs/DATABASE.md](docs/DATABASE.md) | Database per service, CQRS projections, references across services | | |
+| [EXTERNAL_CLOUD_SERVICES_SETUP.md](EXTERNAL_CLOUD_SERVICES_SETUP.md) | Setting up Stripe and AWS: keys, Connect, webhooks, IAM, map key | | |
+| `config/` | Postgres init, NATS hub and leaf configs, toxiproxy, Caddy gateway, Seattle zones | | |
+| `scripts/` | MEC demo (partition, heal, add latency), schema tests, signing key | | |
 
 ```bash
-cargo test --workspace         # build and run the unit tests
-docker compose up --build      # infrastructure, services and both edge zones
+cargo test --workspace         # unit tests; database schema tests show as "ignored"
+docker compose up --build      # infrastructure, cloud services and both edge zones
 
-# Schema tests against real Postgres (port 5432):
-docker compose up -d --wait postgres
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo test --workspace -- --ignored
+# Run one service from source (settings from services/<svc>/.env, then the root .env):
+cargo run -p user-service
+
+# Database schema tests against Postgres on port 5432 (starts it if needed):
+scripts/test-db.sh                       # every service
+scripts/test-db.sh -p merchant-service   # one service
 ```
 
-Services call each other over gRPC on internal ports (auth 9081, dispatch 9082, merchant 9083, commerce 9084; servers not wired up yet) and publish events on NATS JetStream.
+Services call each other over gRPC on internal ports (auth 9081, dispatch 9082, merchant 9083, catalog-read 9084; servers not wired up yet) and publish events on NATS JetStream. Edge services reach the cloud only through their zone's NATS leaf node.
 
 ## Hackathon brief
 

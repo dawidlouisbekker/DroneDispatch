@@ -2,13 +2,14 @@
 //! the repository's `proto/` directory:
 //!
 //! - gRPC clients and servers for service-to-service calls, e.g.
-//!   `dronedrop::merchant::v1::shop_catalog_client::ShopCatalogClient`.
-//! - Protobuf payloads for NATS events and edge commands, in
-//!   [`dronedrop::events::v1`] and [`dronedrop::edge::v1`].
+//!   `dronedrop::catalog::v1::catalog_read_client::CatalogReadClient`.
+//! - Protobuf payloads for NATS events and commands, in [`dronedrop::events::v1`],
+//!   and the station and order types they share ([`dronedrop::station::v1`],
+//!   [`dronedrop::user::v1`]).
 //!
-//! Subject, stream and bucket names live in [`subjects`]. Evolve messages
-//! compatibly: add fields with new numbers and never reuse or renumber one. The
-//! conventions are at the top of `proto/dronedrop/common/v1/common.proto`.
+//! Subject and stream names live in [`subjects`]. Evolve messages compatibly: add
+//! fields with new numbers and never reuse or renumber one. The conventions are at
+//! the top of `proto/dronedrop/common/v1/common.proto`.
 
 pub mod subjects;
 
@@ -41,44 +42,60 @@ mod tests {
     use prost::Message;
 
     use super::dronedrop::{
-        commerce::v1::OrderState,
-        common::v1::{LatLon, Money},
-        events::v1::{DispatchRequest, OrderAuthorized, OrderEvent, order_event},
+        common::v1::LatLon,
+        events::v1::{DispatchRequest, FulfilmentEvent},
+        merchant::v1::FulfilmentStatus,
+        station::v1::{AccessNetwork, BluetoothLe, OwnerKind, Station, access_network},
     };
 
-    #[test]
-    fn order_event_round_trips_with_its_detail() {
-        let event = OrderEvent {
-            event_id: "evt-1".into(),
-            order_id: "order-1".into(),
-            customer_sub: "user-1".into(),
-            business_id: "business-1".into(),
-            state: OrderState::AwaitingMerchant.into(),
-            occurred_at: None,
-            detail: Some(order_event::Detail::Authorized(OrderAuthorized {
-                total: Some(Money { amount_cents: 1_250, currency: "usd".into() }),
-                payload_g: 800,
-                ..Default::default()
-            })),
-        };
-        let decoded = OrderEvent::decode(event.encode_to_vec().as_slice()).unwrap();
-        assert_eq!(decoded, event);
-        assert_eq!(decoded.state(), OrderState::AwaitingMerchant);
+    fn station(owner_kind: OwnerKind, position: LatLon) -> Station {
+        Station {
+            station_id: "station-1".into(),
+            owner_kind: owner_kind.into(),
+            owner_id: "owner-1".into(),
+            position: Some(position),
+            position_accuracy_m: 1.5,
+            access_networks: vec![AccessNetwork {
+                network: Some(access_network::Network::BluetoothLe(BluetoothLe {
+                    service_uuid: "6e400001-b5a3-f393-e0a9-e50e24dcca9e".into(),
+                    station_tag: vec![0x0a, 0x0b, 0x0c, 0x0d],
+                    l2cap_psm: 128,
+                })),
+            }],
+            public_key: vec![0x30, 0x59],
+            public_key_sha256: "ab".repeat(32),
+        }
     }
 
     #[test]
-    fn dispatch_request_round_trips() {
+    fn dispatch_request_round_trips_with_both_stations() {
         let request = DispatchRequest {
             request_id: "req-1".into(),
             order_id: "order-1".into(),
-            pickup: Some(geo::LatLon::new(47.6097, -122.3422).into()),
-            pickup_point_id: "pickup-1".into(),
-            asset_key: "pickup-1.jpg".into(),
-            dropoff: Some(LatLon { lat: 47.6205, lon: -122.3493 }),
+            pickup: Some(station(OwnerKind::Business, geo::LatLon::new(47.6097, -122.3422).into())),
+            dropoff: Some(station(OwnerKind::User, LatLon { lat: 47.6205, lon: -122.3493 })),
             payload_g: 800,
             paid_at: None,
         };
-        assert_eq!(DispatchRequest::decode(request.encode_to_vec().as_slice()).unwrap(), request);
+        let decoded = DispatchRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, request);
+        assert_eq!(decoded.dropoff.unwrap().owner_kind(), OwnerKind::User);
+    }
+
+    #[test]
+    fn fulfilment_event_round_trips() {
+        let event = FulfilmentEvent {
+            event_id: "evt-1".into(),
+            order_id: "order-1".into(),
+            business_id: "business-1".into(),
+            status: FulfilmentStatus::Accepted.into(),
+            member_sub: "member-1".into(),
+            reason: String::new(),
+            occurred_at: None,
+        };
+        let decoded = FulfilmentEvent::decode(event.encode_to_vec().as_slice()).unwrap();
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.status(), FulfilmentStatus::Accepted);
     }
 
     #[test]
@@ -88,10 +105,11 @@ mod tests {
         for package in [
             "dronedrop.common.v1",
             "dronedrop.auth.v1",
+            "dronedrop.user.v1",
             "dronedrop.merchant.v1",
-            "dronedrop.commerce.v1",
+            "dronedrop.catalog.v1",
             "dronedrop.dispatch.v1",
-            "dronedrop.edge.v1",
+            "dronedrop.station.v1",
             "dronedrop.events.v1",
         ] {
             assert!(packages.contains(package), "{package} missing");

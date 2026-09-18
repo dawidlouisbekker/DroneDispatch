@@ -1,6 +1,6 @@
 [package]
 name = "merchant-service"
-description = "Business registration, catalog, pickup markers and merchant portal for Drone Drop"
+description = "Business registration, catalog, pickup markers and merchant API for Drone Drop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,9 +9,12 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-nats.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
+svc-auth.workspace = true
 svc-common.workspace = true
 tokio.workspace = true
-
-[dev-dependencies]
+tracing.workspace = true
 uuid.workspace = true

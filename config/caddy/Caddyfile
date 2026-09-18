@@ -1,0 +1,49 @@
+# ui-gateway: one origin for ui/app. Serves the web build and proxies its APIs,
+# so the browser app and the native app both talk to http://localhost:8086.
+{
+	admin off
+	auto_https off
+}
+
+:8086 {
+	encode gzip
+
+	# The Expo dev server (http://localhost:8087) calls the gateway cross-origin.
+	@dev_origin header Origin http://localhost:8087
+	@dev_preflight {
+		method OPTIONS
+		header Origin http://localhost:8087
+	}
+
+	route {
+		header @dev_origin {
+			Access-Control-Allow-Origin "http://localhost:8087"
+			Access-Control-Allow-Headers "Authorization, Content-Type"
+			Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+			Vary Origin
+		}
+		respond @dev_preflight 204
+
+		# auth-service: OAuth issuer (<APP>/api/auth) and the JSON API behind the sign-in screens.
+		handle_path /api/auth/* {
+			reverse_proxy auth-service:8081
+		}
+		# user-service: the customer API. Alexa+ reaches its MCP server directly, not through here.
+		handle_path /api/user/* {
+			reverse_proxy user-service:8085
+		}
+		# catalog-read-service in the nearest edge zone: public, read-only catalogs.
+		handle_path /api/catalog/* {
+			reverse_proxy catalog-read-sea-north:8084
+		}
+		handle_path /api/merchant/* {
+			reverse_proxy merchant-service:8083
+		}
+		# Web build of ui/app (pnpm --dir ui/app build:web). Unknown paths fall back to the SPA.
+		handle {
+			root * /srv/app/dist
+			try_files {path} /index.html
+			file_server
+		}
+	}
+}

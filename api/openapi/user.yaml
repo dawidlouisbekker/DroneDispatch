@@ -1,0 +1,736 @@
+openapi: 3.1.0
+info:
+  title: Drone Drop customer API
+  version: 0.2.0
+  description: |
+    Public JSON API for the customer area of `ui/app`, served by user-service under `/v1`
+    and exposed through ui-gateway at `/api/user`.
+
+    Every operation needs a Bearer access token issued by auth-service with audience
+    `<APP>/api/user`. user-service owns the customer's orders and their full history, pickup
+    locations and stations. Shop and menu data come from catalog-read-service (`catalog.yaml`).
+    The Alexa+ MCP server runs in the same service at `/mcp`, with its own token audience.
+
+    Errors use `application/problem+json`. When a call is rejected for a business reason,
+    `reason` carries it, e.g. `LOCATION_UNVERIFIED`.
+servers:
+  - url: http://localhost:8086/api/user
+    description: Local ui-gateway
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/me:
+    get:
+      operationId: getMe
+      summary: The signed-in customer
+      description: 'Built from the access token plus `auth.UserDirectory.GetUser`.'
+      responses:
+        '200':
+          description: The customer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/orders:
+    get:
+      operationId: listOrders
+      summary: Order history, newest first
+      description: Every order the customer has placed, from the app or through Alexa+.
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        '200':
+          description: A page of orders
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrderPage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/orders/{orderId}:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    get:
+      operationId: getOrder
+      summary: One order with its status timeline
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/orders/{orderId}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: cancelOrder
+      summary: Cancel an order before pickup
+      description: |
+        Voids or refunds the payment, releases the stock (`merchant.Fulfilment.CancelOrder`) and
+        recalls the drone. Reasons: `ORDER_ALREADY_PICKED_UP`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string }
+      responses:
+        '200':
+          description: The cancelled order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/orders/{orderId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/OrderId'
+    post:
+      operationId: approveOrder
+      summary: Approve or decline a voice order above the approval threshold
+      description: |
+        Needs an access token whose `amr` includes `hwk` (a passkey) and whose `auth_time` is at most
+        5 minutes old; otherwise the response is `403` with a step-up challenge. An approved order
+        continues to payment authorization. Reasons: `ORDER_NOT_AWAITING_APPROVAL`, `APPROVAL_EXPIRED`.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                approve: { type: boolean, default: true }
+      responses:
+        '200':
+          description: The order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Order' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/StepUpRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/pickup-locations:
+    get:
+      operationId: listPickupLocations
+      summary: Pickup locations, verified and pending
+      responses:
+        '200':
+          description: The locations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [locations]
+                properties:
+                  locations:
+                    type: array
+                    items: { $ref: '#/components/schemas/PickupLocation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: createPickupLocation
+      summary: Add a pending pickup location
+      description: |
+        The location stays `PENDING` until the customer verifies it with a passkey.
+        Reasons: `LOCATION_LABEL_TAKEN`, `OUTSIDE_DELIVERY_AREA`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NewPickupLocation' }
+      responses:
+        '201':
+          description: The pending location
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PickupLocation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/pickup-locations/{locationId}/verify:
+    parameters:
+      - $ref: '#/components/parameters/LocationId'
+    post:
+      operationId: verifyPickupLocation
+      summary: Verify a pending location after a passkey step-up
+      description: |
+        Needs an access token whose `amr` includes `hwk` and whose `auth_time` is at most 5 minutes
+        old. Otherwise the response is `403` with a step-up challenge; the app then re-authenticates
+        with `acr_values=mfa&max_age=300` and retries. This is the Alexa link target
+        (`<APP>/locations/verify?id=…`).
+      responses:
+        '200':
+          description: The verified location
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PickupLocation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/StepUpRequired' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/pickup-locations/{locationId}/station:
+    parameters:
+      - $ref: '#/components/parameters/LocationId'
+    get:
+      operationId: getPickupStation
+      summary: The station at a pickup location
+      responses:
+        '200':
+          description: The station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      operationId: registerPickupStation
+      summary: Register the station at a pickup location
+      description: |
+        The station's key pair is generated on the device; only the public key is sent, and drones
+        pin its SHA-256. The station is `PENDING` until it proves it holds the key.
+        Reasons: `LOCATION_UNVERIFIED`, `KEY_ALREADY_REGISTERED`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StationInput' }
+      responses:
+        '200':
+          description: The station
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Station' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/places/autocomplete:
+    get:
+      operationId: autocompletePlaces
+      summary: Address suggestions while typing a new location
+      description: 'Amazon Location Places `Autocomplete`, called server-side so the app holds no AWS credentials.'
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 3 }
+        - name: lat
+          in: query
+          schema: { type: number }
+        - name: lon
+          in: query
+          schema: { type: number }
+      responses:
+        '200':
+          description: Suggestions
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [suggestions]
+                properties:
+                  suggestions:
+                    type: array
+                    items: { $ref: '#/components/schemas/PlaceSuggestion' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/spend-policy:
+    get:
+      operationId: getSpendPolicy
+      summary: The approval threshold for voice orders
+      responses:
+        '200':
+          description: The policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SpendPolicy' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      operationId: updateSpendPolicy
+      summary: Change the approval threshold
+      description: 'Only the app can change the policy; the MCP server cannot. Reasons: `INVALID_POLICY`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SpendPolicy' }
+      responses:
+        '200':
+          description: The updated policy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SpendPolicy' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/payment-methods/setup-session:
+    post:
+      operationId: createPaymentSetupSession
+      summary: Start Stripe Checkout (setup mode) to save a card
+      description: Open `url` in the system browser.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [return_url]
+              properties:
+                return_url:
+                  type: string
+                  description: Where Stripe sends the customer afterwards, e.g. `dronedrop://payment` or `<APP>/payment`.
+      responses:
+        '200':
+          description: The Checkout session
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RedirectLink' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/fleet/snapshot:
+    get:
+      operationId: getFleetSnapshot
+      summary: Zones, hubs, no-fly areas and the latest drone positions
+      description: "Static zone config plus each zone's `dispatch.Fleet.GetFleetSnapshot`. The map starts from this, then follows `/v1/live`."
+      responses:
+        '200':
+          description: The snapshot
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FleetSnapshot' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/live:
+    get:
+      operationId: liveUpdates
+      summary: WebSocket with live drone, mission and order updates
+      description: |
+        Upgrade to a WebSocket. Browsers can't set headers on a WebSocket, so the token travels in the
+        first message instead: the client must send `{"type":"auth","token":"<access token>"}` within
+        5 seconds or the server closes the socket (code 4401). The server then replies `ready` and
+        pushes `LiveServerMessage`s: 1 Hz telemetry for all drones, plus mission and order events for
+        this customer's orders. The client re-sends `auth` with a fresh token before the old one expires.
+      security: []
+      responses:
+        '101':
+          description: Switching protocols. Messages are `LiveClientMessage` (client) and `LiveServerMessage` (server).
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    LocationId:
+      name: locationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Missing or invalid access token
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+          description: '`Bearer resource_metadata="…"`'
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    StepUpRequired:
+      description: A recent passkey is required (RFC 9470)
+      headers:
+        WWW-Authenticate:
+          schema: { type: string }
+          description: '`Bearer error="insufficient_user_authentication", acr_values="mfa", max_age=300`'
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found, or not this customer's
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Rejected for a business reason
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        reason:
+          type: string
+          description: Business reason, e.g. `LOCATION_UNVERIFIED`.
+
+    Money:
+      type: object
+      required: [amount_cents, currency]
+      properties:
+        amount_cents: { type: integer, format: int64 }
+        currency: { type: string, example: usd }
+
+    LatLon:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lon: { type: number, minimum: -180, maximum: 180 }
+
+    Me:
+      type: object
+      required: [sub, email, mfa_enrolled]
+      properties:
+        sub: { type: string, format: uuid }
+        email: { type: string, format: email }
+        mfa_enrolled: { type: boolean }
+
+    OrderState:
+      type: string
+      enum:
+        - AWAITING_APPROVAL
+        - AUTHORIZING
+        - AWAITING_MERCHANT
+        - CAPTURING
+        - PAID
+        - DISPATCH_REQUESTED
+        - DRONE_ASSIGNED
+        - AT_PICKUP
+        - PICKED_UP
+        - DELIVERED
+        - COMPLETED
+        - PAYMENT_FAILED
+        - CANCELLED
+        - REFUNDED
+
+    OrderChannel:
+      type: string
+      enum: [APP, MCP]
+
+    LineItem:
+      type: object
+      required: [item_id, name, spoken_name, unit_price, qty, weight_g]
+      properties:
+        item_id: { type: string, format: uuid }
+        name: { type: string }
+        spoken_name: { type: string }
+        unit_price: { $ref: '#/components/schemas/Money' }
+        qty: { type: integer, minimum: 1 }
+        weight_g: { type: integer, minimum: 1 }
+
+    OrderStateChange:
+      type: object
+      required: [state, at]
+      properties:
+        state: { $ref: '#/components/schemas/OrderState' }
+        at: { type: string, format: date-time }
+        reason: { type: string }
+
+    Approval:
+      type: object
+      required: [status, threshold, expires_at]
+      properties:
+        status: { type: string, enum: [PENDING, APPROVED, DECLINED, EXPIRED] }
+        threshold: { $ref: '#/components/schemas/Money' }
+        expires_at: { type: string, format: date-time }
+        decided_at: { type: [string, 'null'], format: date-time }
+
+    Order:
+      type: object
+      required:
+        [order_id, place_id, business_id, business_name, channel, state, items, subtotal, delivery_fee, total, pickup_location, timeline, created_at]
+      properties:
+        order_id: { type: string, format: uuid }
+        place_id: { type: string, description: The shop's Amazon Location place ID. }
+        business_id: { type: string, format: uuid }
+        business_name: { type: string, description: "The shop's spoken name." }
+        channel: { $ref: '#/components/schemas/OrderChannel' }
+        state: { $ref: '#/components/schemas/OrderState' }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/LineItem' }
+        subtotal: { $ref: '#/components/schemas/Money' }
+        delivery_fee: { $ref: '#/components/schemas/Money' }
+        total: { $ref: '#/components/schemas/Money' }
+        pickup_location: { $ref: '#/components/schemas/PickupLocation' }
+        pickup_position:
+          description: Where the drone collects the order (the business station), for drawing the route.
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/LatLon'
+        approval:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Approval'
+        merchant_accept_by: { type: [string, 'null'], format: date-time }
+        eta_seconds: { type: [integer, 'null'] }
+        timeline:
+          type: array
+          items: { $ref: '#/components/schemas/OrderStateChange' }
+        created_at: { type: string, format: date-time }
+
+    OrderPage:
+      type: object
+      required: [orders]
+      properties:
+        orders:
+          type: array
+          items: { $ref: '#/components/schemas/Order' }
+        next_cursor: { type: [string, 'null'] }
+
+    PickupLocationStatus:
+      type: string
+      enum: [PENDING, VERIFIED, REVOKED]
+
+    PositionSource:
+      type: string
+      description: Where the position came from.
+      enum: [GEOCODE, MAP_PIN, DEVICE_GPS]
+
+    StationStatus:
+      type: string
+      enum: [PENDING, ACTIVE, RETIRED]
+
+    PickupLocation:
+      type: object
+      required: [pickup_location_id, label, address, position, position_source, status]
+      properties:
+        pickup_location_id: { type: string, format: uuid }
+        label: { type: string, example: office }
+        address: { type: string }
+        position: { $ref: '#/components/schemas/LatLon' }
+        position_accuracy_m:
+          type: [number, 'null']
+          description: 95% horizontal error radius, when known.
+        position_source: { $ref: '#/components/schemas/PositionSource' }
+        status: { $ref: '#/components/schemas/PickupLocationStatus' }
+        verified_at: { type: [string, 'null'], format: date-time }
+        station_status:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/StationStatus'
+
+    NewPickupLocation:
+      type: object
+      required: [label, address, position, position_source]
+      properties:
+        label: { type: string, minLength: 1 }
+        address: { type: string, minLength: 1 }
+        position: { $ref: '#/components/schemas/LatLon' }
+        position_accuracy_m: { type: number, exclusiveMinimum: 0 }
+        position_source: { $ref: '#/components/schemas/PositionSource' }
+
+    AccessNetwork:
+      type: object
+      description: One way to reach a station. Bluetooth LE for now; more kinds will be added.
+      required: [kind, service_uuid, station_tag, l2cap_psm]
+      properties:
+        kind: { type: string, enum: [BLUETOOTH_LE] }
+        service_uuid: { type: string, format: uuid }
+        station_tag: { type: string, description: Hex-encoded tag the station advertises. }
+        l2cap_psm: { type: integer, minimum: 1 }
+
+    Station:
+      type: object
+      required: [station_id, status, public_key_sha256, access_networks]
+      properties:
+        station_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/StationStatus' }
+        public_key_sha256: { type: string, pattern: '^[0-9a-f]{64}$' }
+        access_networks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AccessNetwork' }
+        activated_at: { type: [string, 'null'], format: date-time }
+
+    StationInput:
+      type: object
+      required: [public_key, access_networks]
+      properties:
+        public_key:
+          type: string
+          contentEncoding: base64
+          description: DER SubjectPublicKeyInfo of the station's TLS key.
+        access_networks:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/AccessNetwork' }
+
+    PlaceSuggestion:
+      type: object
+      required: [title, address, position]
+      properties:
+        title: { type: string }
+        address: { type: string }
+        position: { $ref: '#/components/schemas/LatLon' }
+
+    SpendPolicy:
+      type: object
+      required: [approval_threshold]
+      properties:
+        approval_threshold:
+          $ref: '#/components/schemas/Money'
+          description: Voice orders above this total wait for approval in the app.
+
+    RedirectLink:
+      type: object
+      required: [url, expires_at]
+      properties:
+        url: { type: string, format: uri }
+        expires_at: { type: string, format: date-time }
+
+    Zone:
+      type: object
+      required: [zone_id, name, boundary]
+      properties:
+        zone_id: { type: string, example: sea-north }
+        name: { type: string }
+        boundary:
+          type: array
+          description: Closed polygon ring as [lon, lat] pairs.
+          items:
+            type: array
+            items: { type: number }
+            minItems: 2
+            maxItems: 2
+        uplink_connected:
+          type: [boolean, 'null']
+          description: Whether the zone's link to the cloud hub is up; `null` while unknown.
+
+    Hub:
+      type: object
+      required: [hub_id, zone_id, position]
+      properties:
+        hub_id: { type: string }
+        zone_id: { type: string }
+        position: { $ref: '#/components/schemas/LatLon' }
+
+    NoFlyZone:
+      type: object
+      required: [name, boundary]
+      properties:
+        name: { type: string, example: KBFI Boeing Field }
+        boundary:
+          type: array
+          items:
+            type: array
+            items: { type: number }
+            minItems: 2
+            maxItems: 2
+
+    DroneState:
+      type: string
+      enum: [IDLE, TAKEOFF, TO_PICKUP, APPROACH, HANDSHAKE, LOADING, TO_DROPOFF, DROPOFF, RETURNING, CHARGING, OUT_OF_SERVICE]
+
+    DroneSample:
+      type: object
+      required: [drone_id, zone, state, position, alt_m, heading_deg, speed_mps, battery_pct, at]
+      properties:
+        drone_id: { type: string }
+        zone: { type: string }
+        state: { $ref: '#/components/schemas/DroneState' }
+        position: { $ref: '#/components/schemas/LatLon' }
+        alt_m: { type: number }
+        heading_deg: { type: number }
+        speed_mps: { type: number }
+        battery_pct: { type: number }
+        order_id: { type: [string, 'null'], format: uuid }
+        at: { type: string, format: date-time }
+
+    FleetSnapshot:
+      type: object
+      required: [zones, hubs, no_fly_zones, drones]
+      properties:
+        zones:
+          type: array
+          items: { $ref: '#/components/schemas/Zone' }
+        hubs:
+          type: array
+          items: { $ref: '#/components/schemas/Hub' }
+        no_fly_zones:
+          type: array
+          items: { $ref: '#/components/schemas/NoFlyZone' }
+        drones:
+          type: array
+          items: { $ref: '#/components/schemas/DroneSample' }
+
+    MissionEventKind:
+      type: string
+      enum: [ASSIGNED, AT_PICKUP, STATION_VERIFIED, STATION_FAILED, PICKED_UP, AT_DROPOFF, DELIVERED, ABORTED, NO_DRONE, RECALLED]
+
+    LiveClientMessage:
+      type: object
+      required: [type, token]
+      properties:
+        type: { type: string, const: auth }
+        token: { type: string }
+
+    LiveServerMessage:
+      oneOf:
+        - type: object
+          required: [type]
+          properties:
+            type: { type: string, const: ready }
+        - type: object
+          required: [type, drone]
+          properties:
+            type: { type: string, const: telemetry }
+            drone: { $ref: '#/components/schemas/DroneSample' }
+        - type: object
+          required: [type, order_id, kind, at]
+          properties:
+            type: { type: string, const: mission_event }
+            order_id: { type: string, format: uuid }
+            kind: { $ref: '#/components/schemas/MissionEventKind' }
+            drone_id: { type: [string, 'null'] }
+            position:
+              oneOf:
+                - type: 'null'
+                - $ref: '#/components/schemas/LatLon'
+            at: { type: string, format: date-time }
+        - type: object
+          required: [type, order_id, state, at]
+          properties:
+            type: { type: string, const: order_event }
+            order_id: { type: string, format: uuid }
+            state: { $ref: '#/components/schemas/OrderState' }
+            at: { type: string, format: date-time }
+        - type: object
+          required: [type, title]
+          properties:
+            type: { type: string, const: error }
+            title: { type: string }
+      discriminator:
+        propertyName: type

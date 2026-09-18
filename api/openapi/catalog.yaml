@@ -1,0 +1,182 @@
+openapi: 3.1.0
+info:
+  title: Drone Drop catalog API
+  version: 0.1.0
+  description: |
+    Public, read-only JSON API served by catalog-read-service under `/v1`, one instance per edge
+    zone, exposed through ui-gateway at `/api/catalog`.
+
+    It serves projections of merchant-service's catalog events (CQRS), keyed by the Amazon Location
+    place ID each business claimed during onboarding. Reads are eventually consistent; prices and
+    stock are re-checked by merchant-service when an order is placed. No token is needed.
+servers:
+  - url: http://localhost:8086/api/catalog
+    description: Local ui-gateway
+
+paths:
+  /v1/catalogs:
+    get:
+      operationId: listCatalogsByPlaceIds
+      summary: Catalogs for a set of place IDs
+      description: Place IDs without a Drone Drop catalog are left out, so search results can be passed straight in.
+      parameters:
+        - name: place_ids
+          in: query
+          required: true
+          style: form
+          explode: false
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 50
+            items: { type: string }
+        - name: accepting_orders_only
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The catalogs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [catalogs]
+                properties:
+                  catalogs:
+                    type: array
+                    items: { $ref: '#/components/schemas/Catalog' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /v1/catalogs/{placeId}:
+    parameters:
+      - $ref: '#/components/parameters/PlaceId'
+    get:
+      operationId: getCatalog
+      summary: One catalog
+      responses:
+        '200':
+          description: The catalog
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Catalog' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/catalogs/{placeId}/menu:
+    parameters:
+      - $ref: '#/components/parameters/PlaceId'
+    get:
+      operationId: getCatalogMenu
+      summary: Menu sections and items
+      parameters:
+        - name: query
+          in: query
+          description: Case-insensitive filter on item names and descriptions.
+          schema: { type: string }
+        - name: include_unavailable
+          in: query
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: The menu
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Menu' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+components:
+  parameters:
+    PlaceId:
+      name: placeId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: No catalog for this place ID
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        reason: { type: string }
+
+    Money:
+      type: object
+      required: [amount_cents, currency]
+      properties:
+        amount_cents: { type: integer, format: int64 }
+        currency: { type: string, example: usd }
+
+    LatLon:
+      type: object
+      required: [lat, lon]
+      properties:
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lon: { type: number, minimum: -180, maximum: 180 }
+
+    Catalog:
+      type: object
+      required: [place_id, business_id, spoken_name, address, position, categories, accepting_orders, prep_time_minutes]
+      properties:
+        place_id: { type: string, description: Amazon Location place ID. }
+        business_id: { type: string, format: uuid }
+        spoken_name: { type: string, description: What Alexa+ reads out. }
+        address: { type: string }
+        position: { $ref: '#/components/schemas/LatLon' }
+        categories:
+          type: array
+          items: { type: string, example: coffee_shop }
+        accepting_orders: { type: boolean }
+        prep_time_minutes: { type: integer, minimum: 1 }
+        updated_at: { type: string, format: date-time }
+
+    CatalogItem:
+      type: object
+      required: [item_id, section_id, name, spoken_name, description, price, weight_g, available]
+      properties:
+        item_id: { type: string, format: uuid }
+        section_id: { type: string, format: uuid }
+        name: { type: string }
+        spoken_name: { type: string, description: What Alexa+ reads out. }
+        description: { type: string }
+        price: { $ref: '#/components/schemas/Money' }
+        weight_g: { type: integer, minimum: 1 }
+        available: { type: boolean }
+        stock_remaining:
+          type: [integer, 'null']
+          minimum: 0
+          description: '`null` means unlimited.'
+
+    CatalogSection:
+      type: object
+      required: [section_id, name, position, items]
+      properties:
+        section_id: { type: string, format: uuid }
+        name: { type: string }
+        position: { type: integer, minimum: 0 }
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogItem' }
+
+    Menu:
+      type: object
+      required: [catalog, sections]
+      properties:
+        catalog: { $ref: '#/components/schemas/Catalog' }
+        sections:
+          type: array
+          items: { $ref: '#/components/schemas/CatalogSection' }

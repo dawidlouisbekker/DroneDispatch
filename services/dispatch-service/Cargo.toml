@@ -1,6 +1,6 @@
 [package]
 name = "dispatch-service"
-description = "MCP server for Alexa+ and drone fleet orchestration for Drone Drop"
+description = "Drone fleet, missions and station handshakes for one Drone Drop edge zone"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-nats.workspace = true
-axum.workspace = true
-rmcp.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+contracts.workspace = true
+futures.workspace = true
 sqlx.workspace = true
 svc-common.workspace = true
 tokio.workspace = true

@@ -1,13 +1,21 @@
 [package]
 name = "svc-auth"
-description = "Access-token claims and challenges for Drone Drop resource servers"
+description = "Access-token verification and challenges for Drone Drop resource servers"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum.workspace = true
+jsonwebtoken.workspace = true
+reqwest.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+svc-common.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true
+tower.workspace = true

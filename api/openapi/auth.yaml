@@ -1,0 +1,531 @@
+openapi: 3.1.0
+info:
+  title: Drone Drop auth API
+  version: 0.1.0
+  description: |
+    auth-service behind ui-gateway at `/api/auth`. The issuer is `<APP>/api/auth`.
+
+    Two parts:
+    - **OAuth 2.1** (`/.well-known/*`, `/authorize`, `/token`, `/revoke`) for the app, Alexa and other clients.
+    - **The JSON API under `/v1`**, called only by the sign-in screens in `ui/app`. It runs on
+      auth-service's session cookie (`dd_session`, `HttpOnly; SameSite=Lax; Path=/api/auth`).
+
+    ### How a sign-in completes
+    1. A client opens `/authorize`. auth-service parks the request and redirects the browser to
+       `<APP>/sign-in?request=<request_id>`.
+    2. The screens read `GET /v1/requests/{request_id}`. Its `next` says what's still needed:
+       `sign_in`, `mfa`, `mfa_enrollment`, `consent` or `complete`.
+    3. After each step they read the request again. When `next` is `complete` (or `consent` has been
+       answered), `POST /v1/requests/{request_id}/complete` returns `redirect_to` and the browser goes there.
+
+    Mutating `/v1` calls must send `Content-Type: application/json` from an allowed `Origin`.
+servers:
+  - url: http://localhost:8086/api/auth
+    description: Local ui-gateway
+
+paths:
+  /.well-known/oauth-authorization-server:
+    get:
+      operationId: getMetadata
+      summary: Authorization server metadata (RFC 8414)
+      responses:
+        '200':
+          description: Metadata
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /.well-known/jwks.json:
+    get:
+      operationId: getJwks
+      summary: Public ES256 signing keys
+      responses:
+        '200':
+          description: JWK set
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+
+  /authorize:
+    get:
+      operationId: authorize
+      summary: Start an authorization code flow (PKCE S256 required)
+      parameters:
+        - { name: response_type, in: query, required: true, schema: { type: string, const: code } }
+        - { name: client_id, in: query, required: true, schema: { type: string } }
+        - { name: redirect_uri, in: query, required: true, schema: { type: string } }
+        - { name: scope, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: code_challenge, in: query, required: true, schema: { type: string } }
+        - { name: code_challenge_method, in: query, required: true, schema: { type: string, const: S256 } }
+        - { name: resource, in: query, required: true, schema: { type: string } }
+        - { name: acr_values, in: query, description: '`mfa` forces a fresh second factor.', schema: { type: string } }
+        - { name: max_age, in: query, schema: { type: integer } }
+      responses:
+        '302':
+          description: To the sign-in screens, or back to the client with an OAuth error.
+        '400':
+          description: Unknown client or redirect URI; the error is shown instead of redirecting.
+
+  /token:
+    post:
+      operationId: token
+      summary: Exchange a code or refresh token
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [authorization_code, refresh_token] }
+                code: { type: string }
+                redirect_uri: { type: string }
+                code_verifier: { type: string }
+                refresh_token: { type: string }
+                client_id: { type: string }
+                client_secret: { type: string }
+      responses:
+        '200':
+          description: Tokens
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResponse' }
+        '400':
+          description: OAuth error (`invalid_grant`, `invalid_request`, …)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuthError' }
+        '401':
+          description: Client authentication failed (`invalid_client`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OAuthError' }
+
+  /revoke:
+    post:
+      operationId: revoke
+      summary: Revoke a refresh token and its grant (RFC 7009)
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+                token_type_hint: { type: string }
+                client_id: { type: string }
+      responses:
+        '200': { description: Revoked, or the token was already unknown }
+
+  /v1/requests/{requestId}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      operationId: getAuthRequest
+      summary: A parked authorization request and what it still needs
+      responses:
+        '200':
+          description: The request
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/requests/{requestId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      operationId: completeAuthRequest
+      summary: Finish the request and get the client redirect
+      description: 'Fails with `409` and the missing step in `reason` (e.g. `MFA_REQUIRED`) if it is not ready.'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                consent:
+                  type: boolean
+                  description: Required as `true` for third-party clients.
+      responses:
+        '200':
+          description: Where to send the browser
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Redirect' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/requests/{requestId}/deny:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      operationId: denyAuthRequest
+      summary: Decline the request; the client gets `access_denied`
+      responses:
+        '200':
+          description: Where to send the browser
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Redirect' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/sign-up:
+    post:
+      operationId: signUp
+      summary: Create an account and sign in
+      description: 'Reasons: `EMAIL_TAKEN`, `WEAK_PASSWORD`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '201':
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/sign-in/password:
+    post:
+      operationId: signInWithPassword
+      summary: Sign in with email and password
+      description: |
+        Accounts with a passkey get a session with `second_factor_pending: true`; finish with
+        `/v1/mfa/passkey/options` and `/v1/mfa/passkey/verify`. Reasons: `INVALID_CREDENTIALS`,
+        `TOO_MANY_ATTEMPTS`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Credentials' }
+      responses:
+        '200':
+          description: Signed in (possibly pending a second factor)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyAttempts' }
+
+  /v1/sign-in/passkey/options:
+    post:
+      operationId: passkeySignInOptions
+      summary: Start a passkey sign-in (no email needed)
+      responses:
+        '200':
+          description: WebAuthn request options
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAuthnOptions' }
+
+  /v1/sign-in/passkey:
+    post:
+      operationId: signInWithPasskey
+      summary: Finish a passkey sign-in
+      description: 'A passkey counts as both factors. If a session is pending a second factor, a passkey of the same account completes it.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAuthnResponse' }
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/mfa/passkey/options:
+    post:
+      operationId: passkeySecondFactorOptions
+      summary: Start checking a passkey of the signed-in account
+      description: |
+        The second factor after a password sign-in, or a fresh one for step-up. Only the account's
+        own passkeys are allowed. Works on a session pending its second factor. Reasons: `NO_PASSKEYS`.
+      responses:
+        '200':
+          description: WebAuthn request options
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAuthnOptions' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/mfa/passkey/verify:
+    post:
+      operationId: verifyPasskeySecondFactor
+      summary: Finish checking a passkey of the signed-in account
+      description: 'Adds `hwk` to the session''s `amr`. Reasons: `CHALLENGE_EXPIRED`, `PASSKEY_REJECTED`, `TOO_MANY_ATTEMPTS`.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebAuthnResponse' }
+      responses:
+        '200':
+          description: Session with the second factor
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyAttempts' }
+
+  /v1/passkeys/options:
+    post:
+      operationId: passkeyRegistrationOptions
+      summary: Start adding a passkey
+      responses:
+        '200':
+          description: WebAuthn creation options
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebAuthnOptions' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/passkeys:
+    get:
+      operationId: listPasskeys
+      summary: The account's passkeys
+      responses:
+        '200':
+          description: Passkeys
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [passkeys]
+                properties:
+                  passkeys:
+                    type: array
+                    items: { $ref: '#/components/schemas/Passkey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      operationId: addPasskey
+      summary: Finish adding a passkey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/WebAuthnResponse'
+                - type: object
+                  required: [name]
+                  properties:
+                    name: { type: string, minLength: 1, maxLength: 60 }
+      responses:
+        '201':
+          description: Added. Creating a passkey counts as using it, so the session gains `hwk`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/passkeys/{passkeyId}:
+    parameters:
+      - { name: passkeyId, in: path, required: true, schema: { type: string, format: uuid } }
+    delete:
+      operationId: removePasskey
+      summary: Remove a passkey (needs a second factor in the last 5 minutes)
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/session:
+    get:
+      operationId: getSession
+      summary: The current browser session
+      responses:
+        '200':
+          description: Signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/sign-out:
+    post:
+      operationId: signOut
+      summary: End the browser session
+      responses:
+        '204': { description: Signed out }
+
+components:
+  parameters:
+    RequestId:
+      name: requestId
+      in: path
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Invalid input
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Unauthorized:
+      description: Not signed in, or the credentials were wrong
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Forbidden:
+      description: Needs a more recent second factor
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    NotFound:
+      description: Not found or expired
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    Conflict:
+      description: Rejected for a reason in `reason`
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    TooManyAttempts:
+      description: Rate limited; try again later
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+
+  schemas:
+    Problem:
+      type: object
+      required: [title, status]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        status: { type: integer }
+        reason: { type: string }
+
+    OAuthError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        error_description: { type: string }
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in: { type: integer }
+        refresh_token: { type: string }
+        scope: { type: string }
+
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 12 }
+
+    Redirect:
+      type: object
+      required: [redirect_to]
+      properties:
+        redirect_to: { type: string }
+
+    Session:
+      type: object
+      required: [user, amr, auth_time, second_factor_pending, factors]
+      properties:
+        user:
+          type: object
+          required: [sub, email]
+          properties:
+            sub: { type: string, format: uuid }
+            email: { type: string, format: email }
+        amr:
+          type: array
+          description: Authentication methods used in this session (RFC 8176), e.g. `pwd`, `hwk`.
+          items: { type: string }
+        auth_time: { type: string, format: date-time }
+        second_factor_pending:
+          type: boolean
+          description: Signed in with a password on an account that has a passkey, which hasn't been used yet.
+        factors: { $ref: '#/components/schemas/Factors' }
+
+    Factors:
+      type: object
+      required: [passkeys]
+      properties:
+        passkeys: { type: integer, description: 'Passkeys on the account, the only second factor.' }
+
+    AuthRequest:
+      type: object
+      required: [request_id, client, resource, scopes, redirect_host, step_up, next]
+      properties:
+        request_id: { type: string }
+        client:
+          type: object
+          required: [client_id, name, first_party]
+          properties:
+            client_id: { type: string }
+            name: { type: string }
+            first_party: { type: boolean }
+        resource: { type: string }
+        scopes:
+          type: array
+          items: { type: string }
+        redirect_host: { type: string }
+        step_up:
+          type: boolean
+          description: The client asked for a fresh second factor (`acr_values=mfa`).
+        mfa_required:
+          type: boolean
+          description: This resource always needs a second factor (the merchant portal).
+        next:
+          type: string
+          enum: [sign_in, mfa, mfa_enrollment, consent, complete]
+        session:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/Session'
+
+    WebAuthnOptions:
+      type: object
+      required: [challenge_id, options]
+      properties:
+        challenge_id: { type: string }
+        options:
+          type: object
+          description: '`publicKey` options for `navigator.credentials.create/get` (JSON form).'
+          additionalProperties: true
+
+    WebAuthnResponse:
+      type: object
+      required: [challenge_id, credential]
+      properties:
+        challenge_id: { type: string }
+        credential:
+          type: object
+          description: The credential as JSON (`@simplewebauthn/browser` output).
+          additionalProperties: true
+
+    Passkey:
+      type: object
+      required: [passkey_id, name, created_at]
+      properties:
+        passkey_id: { type: string, format: uuid }
+        name: { type: string }
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, 'null'], format: date-time }

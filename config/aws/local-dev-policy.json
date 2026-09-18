@@ -1,0 +1,19 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AmazonLocationPlaces",
+      "Effect": "Allow",
+      "Action": [
+        "geo-places:SearchNearby",
+        "geo-places:SearchText",
+        "geo-places:GetPlace",
+        "geo-places:Geocode",
+        "geo-places:ReverseGeocode",
+        "geo-places:Autocomplete",
+        "geo-places:Suggest"
+      ],
+      "Resource": "arn:aws:geo-places:us-west-2::provider/default"
+    }
+  ]
+}

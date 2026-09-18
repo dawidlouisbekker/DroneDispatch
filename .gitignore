@@ -1,2 +1,3 @@
 /target
 .env
+services/auth-service/auth-signing-key.pem

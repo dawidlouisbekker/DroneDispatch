@@ -72,7 +72,11 @@ async fn insert_grant(pool: &PgPool, user_id: Uuid, client_id: &str) -> Uuid {
     id
 }
 
-async fn insert_code(pool: &PgPool, grant_id: Uuid, code_challenge: &'static str) -> Result<PgQueryResult, sqlx::Error> {
+async fn insert_code(
+    pool: &PgPool,
+    grant_id: Uuid,
+    code_challenge: &'static str,
+) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
         "INSERT INTO auth_codes (code_hash, grant_id, redirect_uri, redirect_uri_provided, scope, resource,
                                  code_challenge, acr, amr, auth_time, expires_at)
@@ -86,30 +90,34 @@ async fn insert_code(pool: &PgPool, grant_id: Uuid, code_challenge: &'static str
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn rejects_duplicate_email_ignoring_case(pool: PgPool) {
     insert_user(&pool, "pilot@example.com").await;
 
-    let duplicate = sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, 'Pilot@Example.COM', $2)")
-        .bind(Uuid::now_v7())
-        .bind(PASSWORD_HASH)
-        .execute(&pool)
-        .await;
+    let duplicate = sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, 'Pilot@Example.COM', $2)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(PASSWORD_HASH)
+    .execute(&pool)
+    .await;
     assert_eq!(sqlstate(duplicate), UNIQUE_VIOLATION);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn rejects_password_hash_that_is_not_argon2id(pool: PgPool) {
-    let bcrypt = sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, 'a@example.com', '$2b$12$abc')")
-        .bind(Uuid::now_v7())
-        .execute(&pool)
-        .await;
+    let bcrypt = sqlx::query(
+        "INSERT INTO users (id, email, password_hash) VALUES ($1, 'a@example.com', '$2b$12$abc')",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&pool)
+    .await;
     assert_eq!(sqlstate(bcrypt), CHECK_VIOLATION);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn client_kind_and_auth_method_must_be_known(pool: PgPool) {
     let insert = |kind: &'static str, auth_method: &'static str| {
         sqlx::query(
@@ -123,13 +131,22 @@ async fn client_kind_and_auth_method_must_be_known(pool: PgPool) {
     };
 
     assert!(insert("DCR", "client_secret_post").await.is_ok());
-    assert_eq!(sqlstate(insert("static", "client_secret_basic").await), CHECK_VIOLATION);
-    assert_eq!(sqlstate(insert("CIMD", "client_secret_basic").await), CHECK_VIOLATION);
-    assert_eq!(sqlstate(insert("STATIC", "private_key_jwt").await), CHECK_VIOLATION);
+    assert_eq!(
+        sqlstate(insert("static", "client_secret_basic").await),
+        CHECK_VIOLATION
+    );
+    assert_eq!(
+        sqlstate(insert("CIMD", "client_secret_basic").await),
+        CHECK_VIOLATION
+    );
+    assert_eq!(
+        sqlstate(insert("STATIC", "private_key_jwt").await),
+        CHECK_VIOLATION
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn client_secret_must_match_auth_method(pool: PgPool) {
     let insert = |secret_hash: Option<&'static str>, auth_method: &'static str| {
         sqlx::query(
@@ -144,12 +161,18 @@ async fn client_secret_must_match_auth_method(pool: PgPool) {
 
     assert!(insert(None, "none").await.is_ok());
     assert!(insert(Some("aGFzaA"), "client_secret_basic").await.is_ok());
-    assert_eq!(sqlstate(insert(Some("aGFzaA"), "none").await), CHECK_VIOLATION);
-    assert_eq!(sqlstate(insert(None, "client_secret_post").await), CHECK_VIOLATION);
+    assert_eq!(
+        sqlstate(insert(Some("aGFzaA"), "none").await),
+        CHECK_VIOLATION
+    );
+    assert_eq!(
+        sqlstate(insert(None, "client_secret_post").await),
+        CHECK_VIOLATION
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn client_needs_at_least_one_redirect_uri(pool: PgPool) {
     let insert = |redirect_uris: Option<Vec<Option<&'static str>>>| {
         sqlx::query(
@@ -162,12 +185,15 @@ async fn client_needs_at_least_one_redirect_uri(pool: PgPool) {
     };
 
     assert_eq!(sqlstate(insert(Some(vec![])).await), CHECK_VIOLATION);
-    assert_eq!(sqlstate(insert(Some(vec![Some("https://app.example/cb"), None])).await), CHECK_VIOLATION);
+    assert_eq!(
+        sqlstate(insert(Some(vec![Some("https://app.example/cb"), None])).await),
+        CHECK_VIOLATION
+    );
     assert_eq!(sqlstate(insert(None).await), NOT_NULL_VIOLATION);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn auth_code_requires_s256_challenge_and_existing_grant(pool: PgPool) {
     let user_id = insert_user(&pool, "pilot@example.com").await;
     insert_client(&pool, "alexa").await;
@@ -180,11 +206,13 @@ async fn auth_code_requires_s256_challenge_and_existing_grant(pool: PgPool) {
     let orphan = insert_code(&pool, Uuid::now_v7(), CODE_CHALLENGE).await;
     assert_eq!(sqlstate(orphan), FOREIGN_KEY_VIOLATION);
 
-    insert_code(&pool, grant_id, CODE_CHALLENGE).await.expect("valid code");
+    insert_code(&pool, grant_id, CODE_CHALLENGE)
+        .await
+        .expect("valid code");
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn rejects_duplicate_passkey_credential_id(pool: PgPool) {
     let alice = insert_user(&pool, "alice@example.com").await;
     let bob = insert_user(&pool, "bob@example.com").await;
@@ -203,7 +231,7 @@ async fn rejects_duplicate_passkey_credential_id(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn webauthn_challenge_kind_and_user_rules(pool: PgPool) {
     let user_id = insert_user(&pool, "pilot@example.com").await;
     let insert = |user_id: Option<Uuid>, kind: &'static str| {
@@ -220,19 +248,27 @@ async fn webauthn_challenge_kind_and_user_rules(pool: PgPool) {
     // Passkey-only login starts before the user is known.
     assert!(insert(None, "AUTHENTICATION").await.is_ok());
     assert!(insert(Some(user_id), "REGISTRATION").await.is_ok());
-    assert_eq!(sqlstate(insert(None, "REGISTRATION").await), CHECK_VIOLATION);
-    assert_eq!(sqlstate(insert(Some(user_id), "authentication").await), CHECK_VIOLATION);
+    assert_eq!(
+        sqlstate(insert(None, "REGISTRATION").await),
+        CHECK_VIOLATION
+    );
+    assert_eq!(
+        sqlstate(insert(Some(user_id), "authentication").await),
+        CHECK_VIOLATION
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn deleting_user_cascades_to_everything_they_own(pool: PgPool) {
     let user_id = insert_user(&pool, "pilot@example.com").await;
     let other_user = insert_user(&pool, "other@example.com").await;
     insert_client(&pool, "alexa").await;
     let grant_id = insert_grant(&pool, user_id, "alexa").await;
     let other_grant = insert_grant(&pool, other_user, "alexa").await;
-    insert_code(&pool, grant_id, CODE_CHALLENGE).await.expect("insert code");
+    insert_code(&pool, grant_id, CODE_CHALLENGE)
+        .await
+        .expect("insert code");
 
     let refresh = "INSERT INTO refresh_tokens (token_hash, grant_id, expires_at) VALUES ($1, $2, now() + interval '30 days')";
     for (token_hash, grant) in [("cnQtMQ", grant_id), ("cnQtMg", other_grant)] {
@@ -246,12 +282,9 @@ async fn deleting_user_cascades_to_everything_they_own(pool: PgPool) {
 
     for statement in [
         "INSERT INTO sessions (id_hash, user_id, csrf_token_hash, auth_time, amr, expires_at)
-         VALUES ('c2Vzc2lvbg', $1, 'Y3NyZg', now(), ARRAY['pwd', 'otp'], now() + interval '1 day')",
-        "INSERT INTO mfa_totp (user_id, secret_ciphertext, secret_nonce, confirmed_at, last_used_step)
-         VALUES ($1, '\\xdeadbeef', '\\x000102030405060708090a0b', now(), 59000000)",
+         VALUES ('c2Vzc2lvbg', $1, 'Y3NyZg', now(), ARRAY['pwd', 'hwk'], now() + interval '1 day')",
         "INSERT INTO webauthn_challenges (id_hash, user_id, kind, state, expires_at)
          VALUES ('Y2hhbGxlbmdl', $1, 'REGISTRATION', '{}', now() + interval '5 minutes')",
-        "INSERT INTO recovery_codes (user_id, code_hash) VALUES ($1, 'cmVjb3Zlcnk')",
     ] {
         sqlx::query(statement).bind(user_id).execute(&pool).await.expect(statement);
     }
@@ -273,10 +306,8 @@ async fn deleting_user_cascades_to_everything_they_own(pool: PgPool) {
     for sql in [
         "SELECT count(*) FROM sessions",
         "SELECT count(*) FROM auth_codes",
-        "SELECT count(*) FROM mfa_totp",
         "SELECT count(*) FROM passkeys",
         "SELECT count(*) FROM webauthn_challenges",
-        "SELECT count(*) FROM recovery_codes",
     ] {
         assert_eq!(count(&pool, sql).await, 0, "{sql}");
     }
@@ -288,18 +319,37 @@ async fn deleting_user_cascades_to_everything_they_own(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn client_with_grants_cannot_be_deleted(pool: PgPool) {
     let user_id = insert_user(&pool, "pilot@example.com").await;
     insert_client(&pool, "alexa").await;
     insert_grant(&pool, user_id, "alexa").await;
 
-    let delete = sqlx::query("DELETE FROM clients WHERE client_id = 'alexa'").execute(&pool).await;
+    let delete = sqlx::query("DELETE FROM clients WHERE client_id = 'alexa'")
+        .execute(&pool)
+        .await;
     assert_eq!(sqlstate(delete), FOREIGN_KEY_VIOLATION);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
+async fn signup_challenges_require_valid_attempt_state(pool: PgPool) {
+    let insert = |attempts: i32| {
+        sqlx::query(
+            "INSERT INTO signup_challenges (id_hash, email_hash, otp_hash, expires_at, attempts)
+             VALUES ($1, 'email-hash', 'otp-hash', now() + interval '10 minutes', $2)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(attempts)
+        .execute(&pool)
+    };
+
+    insert(0).await.expect("valid signup challenge");
+    assert_eq!(sqlstate(insert(-1).await), CHECK_VIOLATION);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn outbox_relay_sees_only_unpublished_rows(pool: PgPool) {
     let indexdef: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox' AND indexname = 'outbox_unpublished'",
@@ -307,7 +357,10 @@ async fn outbox_relay_sees_only_unpublished_rows(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .expect("outbox_unpublished index");
-    assert!(indexdef.contains("(created_at) WHERE (published_at IS NULL)"), "{indexdef}");
+    assert!(
+        indexdef.contains("(created_at) WHERE (published_at IS NULL)"),
+        "{indexdef}"
+    );
 
     let (published, pending) = (Uuid::now_v7(), Uuid::now_v7());
     sqlx::query(

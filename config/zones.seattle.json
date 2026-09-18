@@ -1,0 +1,25 @@
+{
+  "description": "Approximate Seattle zones, hubs and no-fly areas for the drone simulation. Boundaries are closed rings of [lon, lat].",
+  "zones": [
+    {
+      "zone_id": "sea-north",
+      "name": "Seattle North",
+      "boundary": [[-122.44, 47.62], [-122.24, 47.62], [-122.24, 47.74], [-122.44, 47.74], [-122.44, 47.62]]
+    },
+    {
+      "zone_id": "sea-south",
+      "name": "Seattle South",
+      "boundary": [[-122.44, 47.49], [-122.24, 47.49], [-122.24, 47.62], [-122.44, 47.62], [-122.44, 47.49]]
+    }
+  ],
+  "hubs": [
+    { "hub_id": "hub-fremont", "zone_id": "sea-north", "position": { "lat": 47.651, "lon": -122.35 } },
+    { "hub_id": "hub-sodo", "zone_id": "sea-south", "position": { "lat": 47.58, "lon": -122.335 } }
+  ],
+  "no_fly_zones": [
+    {
+      "name": "KBFI Boeing Field",
+      "boundary": [[-122.32, 47.51], [-122.285, 47.51], [-122.285, 47.552], [-122.32, 47.552], [-122.32, 47.51]]
+    }
+  ]
+}

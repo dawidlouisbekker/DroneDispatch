@@ -1,0 +1,10 @@
+
+prompts:
+
+Before implementing this I want to update the @docs/ARCHITECTURE.md  and @docs/DATABASE.md . Can you justify the existence of each microservice. I think the commerce-service, edge-node, and map-service can be removed. I think the microservice architecture is the 
+
+auth-service 
+merchant-service with CQRS implementation for fast reads on products. 
+dispatch-service. 
+
+I think the drone delivery will be implemented by an estimate longitude and latitude which is as accurate as possible but when the drone approaches it searches for a specific bluetooth service (pickup and drop off) The drone should have the public key which is used to decrypt/verify the identity of the bluetooth service. 

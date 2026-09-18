@@ -1,0 +1,6 @@
+# Both ship prebuilt binaries; their install scripts aren't needed.
+allowBuilds:
+  '@parcel/watcher': false
+  unrs-resolver: false
+minimumReleaseAgeExclude:
+  - maplibre-gl@6.9.1

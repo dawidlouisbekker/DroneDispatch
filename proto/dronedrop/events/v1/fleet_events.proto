@@ -1,43 +1,73 @@
-// The dispatch command and mission events.
+// Dispatch commands and mission events between user-service and the edge zones.
 syntax = "proto3";
 
 package dronedrop.events.v1;
 
 import "dronedrop/common/v1/common.proto";
+import "dronedrop/station/v1/station.proto";
 import "google/protobuf/timestamp.proto";
 
-// Payload of dispatch.request (work queue DISPATCH_REQUESTS). commerce-service
-// publishes it only after Stripe's verified payment_intent.succeeded webhook
-// moved the order to PAID.
+// Payload of dispatch.<zone>.request (stream DISPATCH_REQUESTS). user-service publishes it
+// once the business accepted and the payment was captured; <zone> is the zone that contains
+// the pickup station. Both stations are copied in, so the zone needs nothing from the cloud.
 message DispatchRequest {
   // Publisher's outbox id; also the Nats-Msg-Id.
   string request_id = 1;
   string order_id = 2;
-  dronedrop.common.v1.LatLon pickup = 3;
-  string pickup_point_id = 4;
-  // Verified marker photo in the PICKUP_ASSETS object store.
-  string asset_key = 5;
-  dronedrop.common.v1.LatLon dropoff = 6;
-  int32 payload_g = 7;
-  google.protobuf.Timestamp paid_at = 8;
+  // The business station.
+  dronedrop.station.v1.Station pickup = 3;
+  // The customer's station.
+  dronedrop.station.v1.Station dropoff = 4;
+  int32 payload_g = 5;
+  google.protobuf.Timestamp paid_at = 6;
+}
+
+// Payload of dispatch.<zone>.recall: abort a mission before pickup, e.g. after a customer
+// cancel. Idempotent on order_id.
+message RecallMission {
+  string request_id = 1;
+  string order_id = 2;
+  string reason = 3;
 }
 
 enum MissionEventKind {
   MISSION_EVENT_KIND_UNSPECIFIED = 0;
   MISSION_EVENT_KIND_ASSIGNED = 1;
   MISSION_EVENT_KIND_AT_PICKUP = 2;
-  MISSION_EVENT_KIND_VISUAL_LOCK = 3;
-  MISSION_EVENT_KIND_PICKUP_FAILED = 4;
+  MISSION_EVENT_KIND_STATION_VERIFIED = 3;
+  MISSION_EVENT_KIND_STATION_FAILED = 4;
   MISSION_EVENT_KIND_PICKED_UP = 5;
-  MISSION_EVENT_KIND_DELIVERED = 6;
-  MISSION_EVENT_KIND_ABORTED = 7;
-  // Published by dispatch-service when no zone had a free drone within 10 minutes.
-  MISSION_EVENT_KIND_NO_DRONE = 8;
+  MISSION_EVENT_KIND_AT_DROPOFF = 6;
+  MISSION_EVENT_KIND_DELIVERED = 7;
+  MISSION_EVENT_KIND_ABORTED = 8;
+  // No drone became free within 10 minutes.
+  MISSION_EVENT_KIND_NO_DRONE = 9;
+  MISSION_EVENT_KIND_RECALLED = 10;
 }
 
-// Payload of mission.<order_id>.<event> (stream MISSIONS). The subject's last
-// token is the kind in lower case, e.g. mission.<id>.visual_lock. Published by
-// edge nodes (sourced from their JetStream domains) and relayed by dispatch-service.
+enum MissionLeg {
+  MISSION_LEG_UNSPECIFIED = 0;
+  MISSION_LEG_PICKUP = 1;
+  MISSION_LEG_DROPOFF = 2;
+}
+
+// One attempt to authenticate a station. Set on STATION_VERIFIED and STATION_FAILED.
+message StationHandshake {
+  string station_id = 1;
+  MissionLeg leg = 2;
+  // The access network used, e.g. "bluetooth_le".
+  string access_network = 3;
+  dronedrop.station.v1.RangingMethod ranging_method = 4;
+  // Measured distance to the station, in metres.
+  float distance_m = 5;
+  bool verified = 6;
+  // Why it failed, e.g. "key_mismatch" or "not_found".
+  string failure_reason = 7;
+}
+
+// Payload of mission.<order_id>.<event> (stream MISSIONS). The subject's last token is the
+// kind in lower case, e.g. mission.<id>.station_verified. Published by dispatch-service in the
+// edge zone and sourced to the hub.
 message MissionEvent {
   // Unique per event; also the Nats-Msg-Id.
   string event_id = 1;
@@ -49,4 +79,5 @@ message MissionEvent {
   google.protobuf.Timestamp occurred_at = 7;
   // Human-readable detail, e.g. why a mission was aborted.
   string detail = 8;
+  StationHandshake handshake = 9;
 }

@@ -1,28 +1,29 @@
-//! auth-service: Drone Drop's OAuth 2.1 authorization server (see README.md).
+//! auth-service binary: see lib.rs and README.md.
 
 use anyhow::Result;
-use sqlx::PgPool;
-use svc_common::{env, env_or};
-
-#[derive(Clone)]
-#[allow(dead_code)] // read by the OAuth and MFA handlers once they land (milestone 2)
-struct AppState {
-    db: PgPool,
-    nats: async_nats::Client,
-}
+use async_nats::jetstream::stream;
+use auth_service::{AppState, config::Config, grpc, registry};
+use contracts::subjects;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    svc_common::load_env(env!("CARGO_MANIFEST_DIR"))?;
     svc_common::init_tracing();
-    let db = svc_common::connect_db(&env("DATABASE_URL")?).await?;
-    sqlx::migrate!().run(&db).await?;
-    let state = AppState {
-        db,
-        nats: svc_common::connect_nats(&env_or("NATS_URL", svc_common::DEFAULT_NATS_URL), "auth-service").await?,
-    };
+    let config = Config::from_env()?;
 
-    // TODO(milestone 2): AS metadata, JWKS, /authorize, /token, /register,
-    // /revoke, login, MFA enrollment and step-up pages.
-    let app = svc_common::health_routes().with_state(state);
-    svc_common::serve(&env_or("HTTP_ADDR", "0.0.0.0:8081"), app).await
+    let db = svc_common::connect_db(&config.database_url).await?;
+    sqlx::migrate!().run(&db).await?;
+    registry::seed_clients(&db, &config).await?;
+
+    let nats = svc_common::connect_nats(&config.nats_url, "auth-service").await?;
+    let auth_events = stream::Config {
+        name: subjects::STREAM_AUTH_EVENTS.to_owned(),
+        subjects: vec!["auth.events.>".to_owned()],
+        ..Default::default()
+    };
+    svc_common::outbox::spawn_relay(db.clone(), nats, vec![auth_events]);
+
+    let (http_addr, grpc_addr) = (config.http_addr.clone(), config.grpc_addr.clone());
+    let app = auth_service::router(AppState::new(db.clone(), config)?);
+    svc_common::serve_with_grpc(&http_addr, app, &grpc_addr, grpc::routes(db)).await
 }

@@ -1,24 +1,39 @@
-//! Schema tests for the `dispatch` database. They need Postgres:
-//!
-//! ```bash
-//! docker compose up -d --wait postgres
-//! DATABASE_URL=postgres://postgres:postgres@localhost:5432/postgres cargo test -p dispatch-service -- --ignored
-//! ```
+//! Schema tests for the `dispatch_<zone>` databases. They need Postgres:
+//! `scripts/test-db.sh -p dispatch-service`.
 
 use sqlx::PgPool;
 use sqlx::postgres::PgQueryResult;
 use uuid::Uuid;
 
-const EVENT_KINDS: [&str; 8] = [
-    "ASSIGNED",
-    "AT_PICKUP",
-    "VISUAL_LOCK",
-    "PICKUP_FAILED",
-    "PICKED_UP",
-    "DELIVERED",
-    "ABORTED",
-    "NO_DRONE",
-];
+const UNIQUE: &str = "23505";
+const CHECK: &str = "23514";
+const FOREIGN_KEY: &str = "23503";
+
+/// One Bluetooth LE access network, as copied from a dispatch request.
+const NETWORKS: &str = r#"[{"kind": "BLUETOOTH_LE", "service_uuid": "6e400001-b5a3-f393-e0a9-e50e24dcca9e", "station_tag": "0a0b0c0d", "l2cap_psm": 128}]"#;
+
+#[track_caller]
+fn assert_sqlstate<T: std::fmt::Debug>(result: Result<T, sqlx::Error>, code: &str) {
+    let err = result.expect_err("expected a database error");
+    assert_eq!(err.as_database_error().expect("database error").code().as_deref(), Some(code), "{err}");
+}
+
+async fn insert_dock(pool: &PgPool) {
+    sqlx::query("INSERT INTO docks (id, lat, lon, capacity) VALUES ('hub-fremont', 47.651, -122.35, 4)")
+        .execute(pool)
+        .await
+        .expect("insert dock");
+}
+
+async fn insert_drone(pool: &PgPool, id: &str, certificate_sha256: &str) -> Result<PgQueryResult, sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO drones (id, dock_id, model, max_payload_g, certificate_sha256) VALUES ($1, 'hub-fremont', 'sim-quad', 2500, $2)",
+    )
+    .bind(id)
+    .bind(certificate_sha256)
+    .execute(pool)
+    .await
+}
 
 async fn insert_mission(
     pool: &PgPool,
@@ -27,14 +42,19 @@ async fn insert_mission(
     payload_g: i32,
 ) -> Result<PgQueryResult, sqlx::Error> {
     sqlx::query(
-        "INSERT INTO missions (order_id, dispatch_request_id, pickup_lat, pickup_lon, pickup_point_id,
-                               asset_key, dropoff_lat, dropoff_lon, payload_g)
-         VALUES ($1, $2, 47.6097, -122.3331, $3, 'pickup-points/marker.jpg', 47.6205, -122.3493, $4)",
+        "INSERT INTO missions (order_id, dispatch_request_id, payload_g,
+             pickup_station_id, pickup_lat, pickup_lon, pickup_accuracy_m, pickup_public_key_sha256, pickup_access_networks,
+             dropoff_station_id, dropoff_lat, dropoff_lon, dropoff_accuracy_m, dropoff_public_key_sha256, dropoff_access_networks)
+         VALUES ($1, $2, $3,
+                 $4, 47.6097, -122.3422, 1.5, repeat('ab', 32), $6::jsonb,
+                 $5, 47.6205, -122.3493, 4.9, repeat('cd', 32), $6::jsonb)",
     )
     .bind(order_id)
     .bind(request_id)
-    .bind(Uuid::now_v7())
     .bind(payload_g)
+    .bind(Uuid::now_v7())
+    .bind(Uuid::now_v7())
+    .bind(NETWORKS)
     .execute(pool)
     .await
 }
@@ -45,160 +65,112 @@ async fn new_mission(pool: &PgPool) -> Uuid {
     order_id
 }
 
-async fn insert_event(
-    pool: &PgPool,
-    event_id: Uuid,
-    order_id: Uuid,
-    kind: &str,
-) -> Result<PgQueryResult, sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO mission_events (event_id, order_id, kind, zone, drone_id, lat, lon, occurred_at)
-         VALUES ($1, $2, $3, 'sea-north', 'drone-07', 47.61, -122.34, now())",
-    )
-    .bind(event_id)
-    .bind(order_id)
-    .bind(kind)
-    .execute(pool)
-    .await
-}
-
-#[track_caller]
-fn assert_sqlstate<T: std::fmt::Debug>(result: Result<T, sqlx::Error>, code: &str) {
-    let err = result.expect_err("expected a database error");
-    assert_eq!(err.as_database_error().expect("database error").code().as_deref(), Some(code), "{err}");
-}
-
-/// (attempts, events) stored for an order.
-async fn child_rows(pool: &PgPool, order_id: Uuid) -> (i64, i64) {
-    sqlx::query_as(
-        "SELECT (SELECT count(*) FROM mission_attempts WHERE order_id = $1),
-                (SELECT count(*) FROM mission_events WHERE order_id = $1)",
-    )
-    .bind(order_id)
-    .fetch_one(pool)
-    .await
-    .expect("count child rows")
-}
-
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn one_mission_per_order(pool: PgPool) {
     let order_id = Uuid::now_v7();
     let request_id = Uuid::now_v7();
     insert_mission(&pool, order_id, request_id, 1200).await.expect("first mission");
 
     // Same order, different request.
-    assert_sqlstate(insert_mission(&pool, order_id, Uuid::now_v7(), 1200).await, "23505");
-    // Redelivered dispatch.request for a different order id.
-    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), request_id, 1200).await, "23505");
+    assert_sqlstate(insert_mission(&pool, order_id, Uuid::now_v7(), 1200).await, UNIQUE);
+    // Redelivered dispatch request for a different order id.
+    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), request_id, 1200).await, UNIQUE);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn payload_is_limited_to_2500_g(pool: PgPool) {
     insert_mission(&pool, Uuid::now_v7(), Uuid::now_v7(), 2500).await.expect("2500 g is allowed");
-    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), Uuid::now_v7(), 2501).await, "23514");
-    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), Uuid::now_v7(), 0).await, "23514");
+    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), Uuid::now_v7(), 2501).await, CHECK);
+    assert_sqlstate(insert_mission(&pool, Uuid::now_v7(), Uuid::now_v7(), 0).await, CHECK);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
-async fn flying_mission_needs_zone_and_drone(pool: PgPool) {
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
+async fn flying_mission_needs_a_known_drone(pool: PgPool) {
+    insert_dock(&pool).await;
+    insert_drone(&pool, "drone-07", &"ef".repeat(32)).await.expect("drone");
     let order_id = new_mission(&pool).await;
-    let set_state = |state: &'static str, zone: Option<&'static str>, drone: Option<&'static str>| {
+    let assign = |state: &'static str, drone: Option<&'static str>| {
         sqlx::query(
-            "UPDATE missions SET state = $2, zone = $3, drone_id = $4, version = version + 1, updated_at = now()
-             WHERE order_id = $1",
+            "UPDATE missions SET state = $2, drone_id = $3, version = version + 1, updated_at = now() WHERE order_id = $1",
         )
         .bind(order_id)
         .bind(state)
-        .bind(zone)
         .bind(drone)
         .execute(&pool)
     };
 
-    assert_sqlstate(set_state("ASSIGNED", None, None).await, "23514");
-    assert_sqlstate(set_state("ASSIGNED", Some("sea-north"), None).await, "23514");
-    assert_sqlstate(set_state("DELIVERED", None, Some("drone-07")).await, "23514");
-    assert_sqlstate(set_state("LOST", None, None).await, "23514");
-    set_state("NO_DRONE", None, None).await.expect("NO_DRONE needs no drone");
-    set_state("ASSIGNED", Some("sea-north"), Some("drone-07")).await.expect("assigned with a drone");
+    assert_sqlstate(assign("ASSIGNED", None).await, CHECK);
+    assert_sqlstate(assign("AT_DROPOFF", None).await, CHECK);
+    assert_sqlstate(assign("LOST", None).await, CHECK);
+    assert_sqlstate(assign("ASSIGNED", Some("drone-99")).await, FOREIGN_KEY);
+    assign("NO_DRONE", None).await.expect("NO_DRONE needs no drone");
+    assign("ASSIGNED", Some("drone-07")).await.expect("assigned with a drone");
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
-async fn every_event_kind_is_accepted(pool: PgPool) {
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
+async fn legs_need_access_networks_and_key_hashes(pool: PgPool) {
     let order_id = new_mission(&pool).await;
-    for kind in EVENT_KINDS {
-        insert_event(&pool, Uuid::now_v7(), order_id, kind).await.unwrap_or_else(|e| panic!("{kind}: {e}"));
-    }
-    assert_eq!(child_rows(&pool, order_id).await.1, EVENT_KINDS.len() as i64);
+    let update = |sql: &'static str| sqlx::query(sql).bind(order_id).execute(&pool);
 
-    assert_sqlstate(insert_event(&pool, Uuid::now_v7(), order_id, "TELEPORTED").await, "23514");
-    assert_sqlstate(insert_event(&pool, Uuid::now_v7(), order_id, "MISSION_EVENT_KIND_ASSIGNED").await, "23514");
+    assert_sqlstate(update("UPDATE missions SET pickup_access_networks = '[]' WHERE order_id = $1").await, CHECK);
+    assert_sqlstate(update("UPDATE missions SET dropoff_access_networks = '{}' WHERE order_id = $1").await, CHECK);
+    assert_sqlstate(update("UPDATE missions SET pickup_public_key_sha256 = 'not-a-hash' WHERE order_id = $1").await, CHECK);
+    assert_sqlstate(update("UPDATE missions SET dropoff_accuracy_m = 0 WHERE order_id = $1").await, CHECK);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
-async fn replayed_event_is_rejected(pool: PgPool) {
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
+async fn handshakes_are_checked_and_follow_their_mission(pool: PgPool) {
+    insert_dock(&pool).await;
+    insert_drone(&pool, "drone-07", &"ef".repeat(32)).await.expect("drone");
     let order_id = new_mission(&pool).await;
-    let event_id = Uuid::now_v7();
-    insert_event(&pool, event_id, order_id, "AT_PICKUP").await.expect("first delivery");
-    assert_sqlstate(insert_event(&pool, event_id, order_id, "AT_PICKUP").await, "23505");
-
-    // Events must belong to a known mission.
-    assert_sqlstate(insert_event(&pool, Uuid::now_v7(), Uuid::now_v7(), "ASSIGNED").await, "23503");
-}
-
-#[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
-async fn attempt_numbers_are_unique_per_order(pool: PgPool) {
-    let order_id = new_mission(&pool).await;
-    let attempt = |n: i32, result: &'static str| {
-        sqlx::query("INSERT INTO mission_attempts (id, order_id, attempt, zone, result) VALUES ($1, $2, $3, 'sea-north', $4)")
-            .bind(Uuid::now_v7())
-            .bind(order_id)
-            .bind(n)
-            .bind(result)
-            .execute(&pool)
+    let handshake = |leg: &'static str, network: &'static str, result: &'static str| {
+        sqlx::query(
+            "INSERT INTO station_handshakes (id, order_id, drone_id, leg, station_id, access_network, ranging_method,
+                                             distance_m, result, attempted_at)
+             VALUES ($1, $2, 'drone-07', $3, $4, $5, 'RSSI', 3.2, $6, now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(order_id)
+        .bind(leg)
+        .bind(Uuid::now_v7())
+        .bind(network)
+        .bind(result)
+        .execute(&pool)
     };
 
-    attempt(1, "NO_FREE_DRONE").await.expect("attempt 1");
-    attempt(2, "ASSIGNED").await.expect("attempt 2");
-    assert_sqlstate(attempt(2, "TIMED_OUT").await, "23505");
-    assert_sqlstate(attempt(0, "TIMED_OUT").await, "23514");
-    assert_sqlstate(attempt(3, "BUSY").await, "23514");
+    handshake("PICKUP", "BLUETOOTH_LE", "KEY_MISMATCH").await.expect("failed attempt");
+    handshake("PICKUP", "BLUETOOTH_LE", "VERIFIED").await.expect("verified attempt");
+    assert_sqlstate(handshake("MIDAIR", "BLUETOOTH_LE", "VERIFIED").await, CHECK);
+    assert_sqlstate(handshake("DROPOFF", "SMOKE_SIGNAL", "VERIFIED").await, CHECK);
+    assert_sqlstate(handshake("DROPOFF", "BLUETOOTH_LE", "LUCKY").await, CHECK);
+
+    // A drone with recorded handshakes can't be deleted; a mission's handshakes go with it.
+    assert_sqlstate(sqlx::query("DELETE FROM drones WHERE id = 'drone-07'").execute(&pool).await, FOREIGN_KEY);
+    sqlx::query("DELETE FROM missions WHERE order_id = $1").bind(order_id).execute(&pool).await.expect("delete mission");
+    let (handshakes,): (i64,) = sqlx::query_as("SELECT count(*) FROM station_handshakes").fetch_one(&pool).await.unwrap();
+    assert_eq!(handshakes, 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
-async fn deleting_a_mission_cascades(pool: PgPool) {
-    let order_id = new_mission(&pool).await;
-    let other_order_id = new_mission(&pool).await;
-    for id in [order_id, other_order_id] {
-        sqlx::query("INSERT INTO mission_attempts (id, order_id, attempt, zone, result) VALUES ($1, $2, 1, 'sea-north', 'ASSIGNED')")
-            .bind(Uuid::now_v7())
-            .bind(id)
-            .execute(&pool)
-            .await
-            .expect("attempt");
-        insert_event(&pool, Uuid::now_v7(), id, "ASSIGNED").await.expect("event");
-    }
-
-    sqlx::query("DELETE FROM missions WHERE order_id = $1").bind(order_id).execute(&pool).await.expect("delete");
-
-    assert_eq!(child_rows(&pool, order_id).await, (0, 0));
-    assert_eq!(child_rows(&pool, other_order_id).await, (1, 1));
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
+async fn drone_certificates_are_unique_hex_hashes(pool: PgPool) {
+    insert_dock(&pool).await;
+    assert_sqlstate(insert_drone(&pool, "drone-01", "xyz").await, CHECK);
+    insert_drone(&pool, "drone-01", &"ef".repeat(32)).await.expect("drone");
+    assert_sqlstate(insert_drone(&pool, "drone-02", &"ef".repeat(32)).await, UNIQUE);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-#[ignore = "needs Postgres: docker compose up -d --wait postgres"]
+#[ignore = "schema test: run scripts/test-db.sh (Postgres on localhost:5432)"]
 async fn inbox_detects_duplicate_messages(pool: PgPool) {
     let insert = || {
-        sqlx::query(
-            "INSERT INTO inbox (consumer, message_id) VALUES ('dispatch-requests', 'msg-1') ON CONFLICT DO NOTHING",
-        )
-        .execute(&pool)
+        sqlx::query("INSERT INTO inbox (consumer, message_id) VALUES ('dispatch-requests', 'msg-1') ON CONFLICT DO NOTHING")
+            .execute(&pool)
     };
     assert_eq!(insert().await.expect("first").rows_affected(), 1);
     assert_eq!(insert().await.expect("duplicate").rows_affected(), 0);

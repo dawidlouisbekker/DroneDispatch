@@ -10,7 +10,7 @@ import "google/protobuf/timestamp.proto";
 // Account lookups. Other services store only a user's `sub` and fetch contact
 // details here when they need them.
 service UserDirectory {
-  // Callers: merchant (member emails for notifications), commerce (Stripe customer email).
+  // Callers: merchant (member emails for notifications), user (customer email for payments).
   // Errors: NOT_FOUND (USER_NOT_FOUND).
   rpc GetUser(GetUserRequest) returns (GetUserResponse);
 
@@ -22,7 +22,7 @@ service UserDirectory {
 // Revoked grants, so a resource server can rebuild its denylist at start-up
 // before following `auth.events.grant_revoked`.
 service GrantRegistry {
-  // Callers: dispatch, merchant, map.
+  // Callers: user, merchant.
   rpc ListRevokedGrants(ListRevokedGrantsRequest) returns (ListRevokedGrantsResponse);
 }
 
@@ -30,7 +30,7 @@ message User {
   string sub = 1;
   string email = 2;
   bool email_verified = 3;
-  // True when TOTP or a passkey is enrolled.
+  // True when a passkey is enrolled.
   bool mfa_enrolled = 4;
   google.protobuf.Timestamp created_at = 5;
   // Set when the account is disabled. Disabled users cannot log in.

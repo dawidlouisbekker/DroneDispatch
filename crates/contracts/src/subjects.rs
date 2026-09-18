@@ -1,73 +1,79 @@
-//! NATS subject, stream and bucket names. Service-to-service calls use gRPC;
-//! NATS carries only durable events, commands and edge traffic. Payloads are
-//! the protobuf messages named on each item.
-
-/// Work-queue command from commerce to dispatch ([`DispatchRequest`]), published
-/// only once an order is PAID.
-///
-/// [`DispatchRequest`]: crate::dronedrop::events::v1::DispatchRequest
-pub const DISPATCH_REQUEST: &str = "dispatch.request";
+//! NATS subject and stream names. Service-to-service calls use gRPC; NATS carries
+//! durable events, commands, and all traffic to and from the edge zones. Payloads
+//! are the protobuf messages named on each item.
 
 /// [`GrantRevoked`](crate::dronedrop::events::v1::GrantRevoked).
 pub const AUTH_GRANT_REVOKED: &str = "auth.events.grant_revoked";
 /// [`UserDeleted`](crate::dronedrop::events::v1::UserDeleted).
 pub const AUTH_USER_DELETED: &str = "auth.events.user_deleted";
-/// [`PickupPointVerified`](crate::dronedrop::events::v1::PickupPointVerified).
-pub const MERCHANT_PICKUP_POINT_VERIFIED: &str = "merchant.pickup_point.verified";
 
-// JetStream streams and buckets.
-/// `order.>`
-pub const STREAM_ORDERS: &str = "ORDERS";
-/// `mission.>`, sourced from the edge domains.
-pub const STREAM_MISSIONS: &str = "MISSIONS";
-/// 1 Hz telemetry, sourced from the edge domains.
-pub const STREAM_TELEMETRY: &str = "TELEMETRY";
-/// `dispatch.request`, work-queue retention.
-pub const STREAM_DISPATCH_REQUESTS: &str = "DISPATCH_REQUESTS";
+// JetStream streams.
 /// `auth.events.>`
 pub const STREAM_AUTH_EVENTS: &str = "AUTH_EVENTS";
-/// `merchant.business.>` and `merchant.pickup_point.>`
+/// `merchant.>`: catalog state (latest message per subject) and fulfilment events.
 pub const STREAM_MERCHANT_EVENTS: &str = "MERCHANT_EVENTS";
-/// `commerce.merchant_account.>`
-pub const STREAM_COMMERCE_EVENTS: &str = "COMMERCE_EVENTS";
-pub const KV_ORDER_VIEW: &str = "ORDER_VIEW";
-pub const OBJECT_STORE_PICKUP_ASSETS: &str = "PICKUP_ASSETS";
+/// `dispatch.>`: dispatch commands, work-queue retention, sourced into each zone.
+pub const STREAM_DISPATCH_REQUESTS: &str = "DISPATCH_REQUESTS";
+/// `mission.>`, sourced from the edge zones.
+pub const STREAM_MISSIONS: &str = "MISSIONS";
+/// 1 Hz telemetry, sourced from the edge zones.
+pub const STREAM_TELEMETRY: &str = "TELEMETRY";
 
-/// `order.<order_id>.<event>` ([`OrderEvent`]); `event` is the detail case,
-/// e.g. `paid` or `payment_failed`.
+/// Every catalog state subject: what catalog-read-service projects.
+pub const MERCHANT_STATE: &str = "merchant.state.>";
+
+/// `merchant.state.catalog.<place_id>` ([`CatalogState`]). Amazon place IDs are used
+/// as a subject token, so they must not contain `.`, `*`, `>` or whitespace.
 ///
-/// [`OrderEvent`]: crate::dronedrop::events::v1::OrderEvent
-pub fn order_event(order_id: &str, event: &str) -> String {
-    format!("order.{order_id}.{event}")
+/// [`CatalogState`]: crate::dronedrop::events::v1::CatalogState
+pub fn catalog_state(place_id: &str) -> String {
+    format!("merchant.state.catalog.{place_id}")
 }
 
-/// `merchant.business.<business_id>.status_changed` ([`BusinessStatusChanged`]).
+/// `merchant.state.section.<section_id>` ([`CatalogSectionState`]).
 ///
-/// [`BusinessStatusChanged`]: crate::dronedrop::events::v1::BusinessStatusChanged
-pub fn business_status_changed(business_id: &str) -> String {
-    format!("merchant.business.{business_id}.status_changed")
+/// [`CatalogSectionState`]: crate::dronedrop::events::v1::CatalogSectionState
+pub fn section_state(section_id: &str) -> String {
+    format!("merchant.state.section.{section_id}")
 }
 
-/// `commerce.merchant_account.<business_id>.updated` ([`MerchantAccountUpdated`]).
+/// `merchant.state.item.<item_id>` ([`CatalogItemState`]).
 ///
-/// [`MerchantAccountUpdated`]: crate::dronedrop::events::v1::MerchantAccountUpdated
-pub fn merchant_account_updated(business_id: &str) -> String {
-    format!("commerce.merchant_account.{business_id}.updated")
+/// [`CatalogItemState`]: crate::dronedrop::events::v1::CatalogItemState
+pub fn item_state(item_id: &str) -> String {
+    format!("merchant.state.item.{item_id}")
 }
 
-/// `cmd.edge.<zone>.<command>` ([`EdgeCommand`]): assign, recall, handoff or loaded.
+/// `merchant.fulfilment.<order_id>.<status>` ([`FulfilmentEvent`]); `status` in
+/// lower case, e.g. `accepted`.
 ///
-/// [`EdgeCommand`]: crate::dronedrop::edge::v1::EdgeCommand
-pub fn edge_command(zone: &str, command: &str) -> String {
-    format!("cmd.edge.{zone}.{command}")
+/// [`FulfilmentEvent`]: crate::dronedrop::events::v1::FulfilmentEvent
+pub fn fulfilment_event(order_id: &str, status: &str) -> String {
+    format!("merchant.fulfilment.{order_id}.{status}")
 }
 
-/// Wildcard matching every command for one zone.
-pub fn edge_commands(zone: &str) -> String {
-    format!("cmd.edge.{zone}.>")
+/// `dispatch.<zone>.request` ([`DispatchRequest`]): from user-service to the zone that
+/// contains the pickup station, once the order is paid.
+///
+/// [`DispatchRequest`]: crate::dronedrop::events::v1::DispatchRequest
+pub fn dispatch_request(zone: &str) -> String {
+    format!("dispatch.{zone}.request")
 }
 
-/// `mission.<order_id>.<event>` ([`MissionEvent`]).
+/// `dispatch.<zone>.recall` ([`RecallMission`]).
+///
+/// [`RecallMission`]: crate::dronedrop::events::v1::RecallMission
+pub fn dispatch_recall(zone: &str) -> String {
+    format!("dispatch.{zone}.recall")
+}
+
+/// Wildcard matching every dispatch command for one zone.
+pub fn dispatch_commands(zone: &str) -> String {
+    format!("dispatch.{zone}.>")
+}
+
+/// `mission.<order_id>.<event>` ([`MissionEvent`]); `event` is the kind in lower
+/// case, e.g. `station_verified`.
 ///
 /// [`MissionEvent`]: crate::dronedrop::events::v1::MissionEvent
 pub fn mission_event(order_id: &str, event: &str) -> String {
@@ -76,16 +82,9 @@ pub fn mission_event(order_id: &str, event: &str) -> String {
 
 /// `tlm.raw.<zone>.<drone_id>` ([`Telemetry`]): 10 Hz, stays inside the edge zone.
 ///
-/// [`Telemetry`]: crate::dronedrop::edge::v1::Telemetry
+/// [`Telemetry`]: crate::dronedrop::dispatch::v1::Telemetry
 pub fn telemetry_raw(zone: &str, drone_id: &str) -> String {
     format!("tlm.raw.{zone}.{drone_id}")
-}
-
-/// `metrics.edge.<zone>` ([`EdgeMetrics`]).
-///
-/// [`EdgeMetrics`]: crate::dronedrop::edge::v1::EdgeMetrics
-pub fn edge_metrics(zone: &str) -> String {
-    format!("metrics.edge.{zone}")
 }
 
 #[cfg(test)]
@@ -94,12 +93,14 @@ mod tests {
 
     #[test]
     fn builds_subjects() {
-        assert_eq!(order_event("o1", "paid"), "order.o1.paid");
-        assert_eq!(business_status_changed("b1"), "merchant.business.b1.status_changed");
-        assert_eq!(merchant_account_updated("b1"), "commerce.merchant_account.b1.updated");
-        assert_eq!(edge_command("sea-north", "loaded"), "cmd.edge.sea-north.loaded");
-        assert_eq!(edge_commands("sea-south"), "cmd.edge.sea-south.>");
-        assert_eq!(mission_event("o1", "visual_lock"), "mission.o1.visual_lock");
+        assert_eq!(catalog_state("AQAB-place"), "merchant.state.catalog.AQAB-place");
+        assert_eq!(section_state("s1"), "merchant.state.section.s1");
+        assert_eq!(item_state("i1"), "merchant.state.item.i1");
+        assert_eq!(fulfilment_event("o1", "accepted"), "merchant.fulfilment.o1.accepted");
+        assert_eq!(dispatch_request("sea-north"), "dispatch.sea-north.request");
+        assert_eq!(dispatch_recall("sea-south"), "dispatch.sea-south.recall");
+        assert_eq!(dispatch_commands("sea-south"), "dispatch.sea-south.>");
+        assert_eq!(mission_event("o1", "station_verified"), "mission.o1.station_verified");
         assert_eq!(telemetry_raw("sea-north", "d7"), "tlm.raw.sea-north.d7");
     }
 }

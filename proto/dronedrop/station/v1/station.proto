@@ -1,0 +1,62 @@
+// Wireless stations at pickup and drop-off points. A drone flies to a station's
+// position, finds it on one of its access networks, and authenticates it with mutual
+// TLS: the drone pins the station's public key, and the station checks the drone's
+// certificate against its zone's fleet CA. See docs/ARCHITECTURE.md, flow 5.
+syntax = "proto3";
+
+package dronedrop.station.v1;
+
+import "dronedrop/common/v1/common.proto";
+
+enum OwnerKind {
+  OWNER_KIND_UNSPECIFIED = 0;
+  // A business's pickup station (merchant-service).
+  OWNER_KIND_BUSINESS = 1;
+  // A customer's station at a pickup location (user-service).
+  OWNER_KIND_USER = 2;
+}
+
+// How a drone measured its distance to a station.
+enum RangingMethod {
+  RANGING_METHOD_UNSPECIFIED = 0;
+  // Satellite position only.
+  RANGING_METHOD_GNSS = 1;
+  // Received signal strength: coarse, metres.
+  RANGING_METHOD_RSSI = 2;
+  // Bluetooth 6.0 Channel Sounding: tens of centimetres.
+  RANGING_METHOD_CHANNEL_SOUNDING = 3;
+}
+
+message Station {
+  string station_id = 1;
+  OwnerKind owner_kind = 2;
+  // merchant-service businesses.id, or the customer's sub.
+  string owner_id = 3;
+  // Where the drone flies before it starts scanning.
+  dronedrop.common.v1.LatLon position = 4;
+  // 95% horizontal error radius of `position`, in metres.
+  float position_accuracy_m = 5;
+  // In the order the drone tries them.
+  repeated AccessNetwork access_networks = 6;
+  // DER SubjectPublicKeyInfo of the station's TLS key.
+  bytes public_key = 7;
+  // Lowercase hex SHA-256 of `public_key`. The drone accepts only this key.
+  string public_key_sha256 = 8;
+}
+
+// One way to reach a station. New kinds (Wi-Fi, UWB, …) are added as new cases;
+// existing numbers are never reused.
+message AccessNetwork {
+  oneof network {
+    BluetoothLe bluetooth_le = 1;
+  }
+}
+
+message BluetoothLe {
+  // Platform-wide 128-bit service UUID every station advertises.
+  string service_uuid = 1;
+  // Identifies this station in its advertisement. BLE addresses rotate, so the MAC is never used.
+  bytes station_tag = 2;
+  // L2CAP connection-oriented channel the TLS session runs over.
+  uint32 l2cap_psm = 3;
+}

@@ -1,0 +1,12 @@
+[package]
+name = "station"
+description = "Station access networks and public-key pinning for Drone Drop drones and stations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

@@ -1,5 +1,8 @@
-# Local Drone Drop stack: shared infrastructure, the five cloud services, and two
-# simulated MEC edge zones whose NATS uplinks run through toxiproxy.
+# Local Drone Drop stack: shared infrastructure, the three cloud services (auth,
+# user, merchant), and two simulated MEC edge zones. Each zone runs
+# catalog-read-service and dispatch-service behind its own NATS leaf, whose uplink
+# runs through toxiproxy. Locally the zones share the Postgres container (one
+# database per zone); in a real MEC deployment each zone runs its own.
 name: drone-drop
 
 x-cloud-service: &cloud-service
@@ -7,10 +10,6 @@ x-cloud-service: &cloud-service
   depends_on:
     postgres: { condition: service_healthy }
     nats-hub: { condition: service_started }
-
-x-edge-node: &edge-node
-  build: { context: ., args: { SERVICE: edge-node } }
-  restart: unless-stopped
 
 services:
   # --- Infrastructure --------------------------------------------------------
@@ -60,16 +59,6 @@ services:
     ports: ["4224:4222"]
     depends_on: [toxiproxy]
 
-  minio:
-    image: quay.io/minio/minio:latest
-    command: ["server", "/data", "--console-address", ":9001"]
-    environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio-secret
-    volumes:
-      - minio-data:/data
-    ports: ["9000:9000", "9001:9001"]
-
   mailpit:
     image: axllent/mailpit
     ports: ["8025:8025", "1025:1025"]
@@ -78,7 +67,14 @@ services:
   stripe-cli:
     image: stripe/stripe-cli
     profiles: [stripe]
-    command: ["listen", "--api-key", "${STRIPE_SECRET_KEY:-}", "--forward-to", "commerce-service:8084/webhooks/stripe"]
+    # Event lists and why: EXTERNAL_CLOUD_SERVICES_SETUP.md, "Webhooks".
+    command:
+      - "listen"
+      - "--api-key=${STRIPE_SECRET_KEY:-}"
+      - "--events=payment_intent.amount_capturable_updated,payment_intent.succeeded,payment_intent.payment_failed,payment_intent.canceled,charge.refunded,refund.updated,checkout.session.completed"
+      - "--forward-to=http://user-service:8085/webhooks/stripe"
+      - "--thin-events=v2.core.account[requirements].updated,v2.core.account[configuration.recipient].capability_status_updated,v2.core.account_link.returned"
+      - "--forward-thin-to=http://merchant-service:8083/webhooks/stripe/thin"
 
   # --- Cloud services --------------------------------------------------------
   auth-service:
@@ -88,19 +84,32 @@ services:
       HTTP_ADDR: 0.0.0.0:8081
       DATABASE_URL: postgres://auth:auth@postgres:5432/auth
       NATS_URL: nats://nats-hub:4222
+      SMTP_HOST: mailpit
+      SMTP_PORT: 1025
+      SMTP_FROM: "Drone Drop <no-reply@dronedrop.local>"
+      MCP_RESOURCE_URL: ${USER_PUBLIC_URL:-http://localhost:8085}/mcp
+      AUTH_SIGNING_KEY_FILE: /run/auth/auth-signing-key.pem
+    volumes:
+      - ./services/auth-service/auth-signing-key.pem:/run/auth/auth-signing-key.pem:ro
     ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats-hub: { condition: service_started }
+      mailpit: { condition: service_started }
 
-  dispatch-service:
+  user-service:
     <<: *cloud-service
-    build: { context: ., args: { SERVICE: dispatch-service } }
+    build: { context: ., args: { SERVICE: user-service } }
     environment:
-      HTTP_ADDR: 0.0.0.0:8082
-      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch
+      HTTP_ADDR: 0.0.0.0:8085
+      DATABASE_URL: postgres://user_service:user_service@postgres:5432/user_service
       NATS_URL: nats://nats-hub:4222
-      PUBLIC_URL: ${DISPATCH_PUBLIC_URL:-http://localhost:8082}
+      API_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8086}/api/user
+      MCP_PUBLIC_URL: ${USER_PUBLIC_URL:-http://localhost:8085}
       AUTH_ISSUER: ${AUTH_ISSUER:-http://localhost:8081}
+      AUTH_JWKS_URL: http://auth-service:8081/.well-known/jwks.json
       MCP_ALLOWED_HOSTS: ${MCP_ALLOWED_HOSTS:-localhost,127.0.0.1}
-    ports: ["8082:8082"]
+    ports: ["8085:8085"]
 
   merchant-service:
     <<: *cloud-service
@@ -109,46 +118,76 @@ services:
       HTTP_ADDR: 0.0.0.0:8083
       DATABASE_URL: postgres://merchant:merchant@postgres:5432/merchant
       NATS_URL: nats://nats-hub:4222
+      API_PUBLIC_URL: ${APP_PUBLIC_URL:-http://localhost:8086}/api/merchant
+      AUTH_ISSUER: ${AUTH_ISSUER:-http://localhost:8081}
+      AUTH_JWKS_URL: http://auth-service:8081/.well-known/jwks.json
     ports: ["8083:8083"]
 
-  commerce-service:
-    <<: *cloud-service
-    build: { context: ., args: { SERVICE: commerce-service } }
-    environment:
-      HTTP_ADDR: 0.0.0.0:8084
-      DATABASE_URL: postgres://commerce:commerce@postgres:5432/commerce
-      NATS_URL: nats://nats-hub:4222
-    ports: ["8084:8084"]
-
-  map-service:
-    <<: *cloud-service
-    build: { context: ., args: { SERVICE: map-service } }
-    environment:
-      HTTP_ADDR: 0.0.0.0:8085
-      DATABASE_URL: postgres://map:map@postgres:5432/map
-      NATS_URL: nats://nats-hub:4222
-    ports: ["8085:8085"]
+  # One origin for ui/app: the web build plus /api/user, /api/merchant and /api/catalog
+  # (config/caddy/Caddyfile). The app folder is mounted rather than dist/, so Docker never
+  # creates dist/ as root.
+  ui-gateway:
+    image: caddy:2
+    restart: unless-stopped
+    volumes:
+      - ./config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./ui/app:/srv/app:ro
+    ports: ["8086:8086"]
+    depends_on: [user-service, merchant-service, catalog-read-sea-north]
 
   # --- MEC edge zones --------------------------------------------------------
-  edge-sea-north:
-    <<: *edge-node
+  catalog-read-sea-north:
+    build: { context: ., args: { SERVICE: catalog-read-service } }
+    restart: unless-stopped
     environment:
       EDGE_ZONE: sea-north
+      HTTP_ADDR: 0.0.0.0:8084
+      DATABASE_URL: postgres://catalog_read:catalog_read@postgres:5432/catalog_read_sea_north
       NATS_URL: nats://nats-leaf-sea-north:4222
-      HTTP_ADDR: 0.0.0.0:8090
-    ports: ["8091:8090"]
-    depends_on: [nats-leaf-sea-north]
+    ports: ["8084:8084"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats-leaf-sea-north: { condition: service_started }
 
-  edge-sea-south:
-    <<: *edge-node
+  catalog-read-sea-south:
+    build: { context: ., args: { SERVICE: catalog-read-service } }
+    restart: unless-stopped
     environment:
       EDGE_ZONE: sea-south
+      HTTP_ADDR: 0.0.0.0:8084
+      DATABASE_URL: postgres://catalog_read:catalog_read@postgres:5432/catalog_read_sea_south
       NATS_URL: nats://nats-leaf-sea-south:4222
-      HTTP_ADDR: 0.0.0.0:8090
-    ports: ["8092:8090"]
-    depends_on: [nats-leaf-sea-south]
+    ports: ["8094:8084"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats-leaf-sea-south: { condition: service_started }
+
+  dispatch-sea-north:
+    build: { context: ., args: { SERVICE: dispatch-service } }
+    restart: unless-stopped
+    environment:
+      EDGE_ZONE: sea-north
+      HTTP_ADDR: 0.0.0.0:8082
+      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch_sea_north
+      NATS_URL: nats://nats-leaf-sea-north:4222
+    ports: ["8082:8082"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats-leaf-sea-north: { condition: service_started }
+
+  dispatch-sea-south:
+    build: { context: ., args: { SERVICE: dispatch-service } }
+    restart: unless-stopped
+    environment:
+      EDGE_ZONE: sea-south
+      HTTP_ADDR: 0.0.0.0:8082
+      DATABASE_URL: postgres://dispatch:dispatch@postgres:5432/dispatch_sea_south
+      NATS_URL: nats://nats-leaf-sea-south:4222
+    ports: ["8092:8082"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      nats-leaf-sea-south: { condition: service_started }
 
 volumes:
   postgres-data:
   nats-hub-data:
-  minio-data:

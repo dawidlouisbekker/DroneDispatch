@@ -1,9 +1,16 @@
-//! Resource-server side of Drone Drop auth: the access-token claims every
-//! service checks and the `WWW-Authenticate` challenges it returns.
+//! Resource-server side of Drone Drop auth:
 //!
-//! Still to come (milestone 2): a JWKS cache fed from auth-service, ES256
-//! signature and `iss`/`aud`/`exp` validation, and a denylist of grant ids fed
-//! by `auth.events.grant_revoked`.
+//! - [`TokenVerifier`] checks ES256 access tokens against auth-service's
+//!   published keys (`iss`, `aud`, `exp`, and revoked grants).
+//! - [`Authenticated`] is the axum extractor services put on protected handlers.
+//! - [`require_scope`] and [`require_fresh_mfa`] add per-operation checks, and
+//!   the challenge helpers build the matching `WWW-Authenticate` headers.
+
+mod extract;
+mod verifier;
+
+pub use extract::{AuthConfig, AuthRejection, Authenticated, require_fresh_mfa, require_scope};
+pub use verifier::{TokenVerifier, VerifyError};
 
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +19,7 @@ use serde::{Deserialize, Serialize};
 pub struct AccessClaims {
     pub iss: String,
     pub sub: String,
-    /// Exactly one resource, e.g. `https://dispatch.example/mcp`.
+    /// Exactly one resource, e.g. `https://user.example/mcp`.
     pub aud: String,
     pub client_id: String,
     /// Space-separated scopes.
@@ -25,7 +32,7 @@ pub struct AccessClaims {
     pub gid: String,
     #[serde(default)]
     pub acr: Option<String>,
-    /// Authentication methods (RFC 8176), e.g. `pwd`, `otp`, `hwk`.
+    /// Authentication methods (RFC 8176), e.g. `pwd`, `hwk`.
     #[serde(default)]
     pub amr: Vec<String>,
     #[serde(default)]
@@ -37,10 +44,10 @@ impl AccessClaims {
         self.scope.split(' ').any(|s| s == scope)
     }
 
-    /// Whether the user completed a second factor (TOTP or passkey) at most
+    /// Whether the user completed the second factor, a passkey (`hwk`), at most
     /// `max_age_secs` before `now` (unix seconds).
     pub fn has_fresh_mfa(&self, now: i64, max_age_secs: i64) -> bool {
-        let second_factor = self.amr.iter().any(|m| m == "otp" || m == "hwk");
+        let second_factor = self.amr.iter().any(|m| m == "hwk");
         second_factor && self.auth_time.is_some_and(|t| now - t <= max_age_secs)
     }
 }
@@ -88,10 +95,14 @@ mod tests {
 
     #[test]
     fn fresh_mfa_needs_second_factor_and_recent_auth() {
-        assert!(claims(&["pwd", "otp"], Some(1_000)).has_fresh_mfa(1_300, 300));
+        assert!(claims(&["pwd", "hwk"], Some(1_000)).has_fresh_mfa(1_300, 300));
         assert!(claims(&["hwk"], Some(1_000)).has_fresh_mfa(1_300, 300));
-        assert!(!claims(&["pwd", "otp"], Some(1_000)).has_fresh_mfa(1_301, 300));
+        assert!(!claims(&["pwd", "hwk"], Some(1_000)).has_fresh_mfa(1_301, 300));
         assert!(!claims(&["pwd"], Some(1_000)).has_fresh_mfa(1_000, 300));
-        assert!(!claims(&["otp"], None).has_fresh_mfa(1_000, 300));
+        assert!(
+            !claims(&["pwd", "otp"], Some(1_000)).has_fresh_mfa(1_000, 300),
+            "authenticator app codes no longer count"
+        );
+        assert!(!claims(&["hwk"], None).has_fresh_mfa(1_000, 300));
     }
 }
